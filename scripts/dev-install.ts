@@ -45,7 +45,7 @@ const marketplaces = existsSync(marketplacesFile)
 
 if (!marketplaces[MARKETPLACE_NAME]) {
   marketplaces[MARKETPLACE_NAME] = {
-    source: { source: 'local', path: PROJECT_ROOT },
+    source: { source: 'directory', path: MARKETPLACE_DIR },
     installLocation: MARKETPLACE_DIR,
     lastUpdated: new Date().toISOString(),
   };
