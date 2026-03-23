@@ -82,4 +82,53 @@ function migrate(db: Database): void {
     db.run('PRAGMA user_version = 1');
     db.run('COMMIT');
   }
+
+  if (version < 2) {
+    db.run('BEGIN');
+    db.run(`
+      CREATE TABLE IF NOT EXISTS session_summaries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT UNIQUE NOT NULL,
+        project TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        files_read TEXT,
+        files_edited TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+      )
+    `);
+    db.run('CREATE INDEX IF NOT EXISTS idx_summaries_session ON session_summaries(session_id)');
+    db.run('CREATE INDEX IF NOT EXISTS idx_summaries_project ON session_summaries(project, created_at DESC)');
+
+    db.run(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS session_summaries_fts USING fts5(
+        summary, files_read, files_edited,
+        content='session_summaries', content_rowid='id'
+      )
+    `);
+
+    db.run(`
+      CREATE TRIGGER IF NOT EXISTS summaries_ai AFTER INSERT ON session_summaries BEGIN
+        INSERT INTO session_summaries_fts(rowid, summary, files_read, files_edited)
+        VALUES (new.id, new.summary, new.files_read, new.files_edited);
+      END
+    `);
+    db.run(`
+      CREATE TRIGGER IF NOT EXISTS summaries_ad AFTER DELETE ON session_summaries BEGIN
+        INSERT INTO session_summaries_fts(session_summaries_fts, rowid, summary, files_read, files_edited)
+        VALUES('delete', old.id, old.summary, old.files_read, old.files_edited);
+      END
+    `);
+    db.run(`
+      CREATE TRIGGER IF NOT EXISTS summaries_au AFTER UPDATE ON session_summaries BEGIN
+        INSERT INTO session_summaries_fts(session_summaries_fts, rowid, summary, files_read, files_edited)
+        VALUES('delete', old.id, old.summary, old.files_read, old.files_edited);
+        INSERT INTO session_summaries_fts(rowid, summary, files_read, files_edited)
+        VALUES (new.id, new.summary, new.files_read, new.files_edited);
+      END
+    `);
+
+    db.run('PRAGMA user_version = 2');
+    db.run('COMMIT');
+  }
 }
