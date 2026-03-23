@@ -1,10 +1,7 @@
 import { readStdin } from '../stdin';
 import { getDb } from '../db';
 import { extractFilePaths } from '../files';
-
-export interface HookResponse {
-  continue: boolean;
-}
+import type { HookResponse } from './user-prompt-submit';
 
 export function handlePostToolUse(
   input: Record<string, unknown>,
