@@ -24,4 +24,17 @@ for (const hook of hooks) {
   });
 }
 
-console.log(`Built ${hooks.length} hooks to plugin/scripts/`);
+// Build the summarize worker (spawned by stop hook)
+await build({
+  entryPoints: ['src/summarize-worker.ts'],
+  bundle: true,
+  outfile: 'plugin/scripts/summarize-worker.js',
+  platform: 'node',
+  target: 'esnext',
+  format: 'esm',
+  minify: false,
+  external: ['bun:sqlite'],
+  banner: { js: '#!/usr/bin/env bun' },
+});
+
+console.log(`Built ${hooks.length} hooks + summarize-worker to plugin/scripts/`);

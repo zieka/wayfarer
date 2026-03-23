@@ -27,33 +27,23 @@ describe('handleStop', () => {
     try { unlinkSync(TEST_DB + '-shm'); } catch {}
   });
 
-  it('skips summarization when no API key', async () => {
-    const origKey = process.env.ANTHROPIC_API_KEY;
-    delete process.env.ANTHROPIC_API_KEY;
-    try {
-      const result = await handleStop({ session_id: 'sess-1', cwd: '/project' }, TEST_DB);
-      expect(result).toEqual({ continue: true });
-      const db = getDb(TEST_DB);
-      const summary = db.query('SELECT * FROM session_summaries WHERE session_id = ?').get('sess-1');
-      expect(summary).toBeNull();
-      db.close();
-    } finally {
-      if (origKey) process.env.ANTHROPIC_API_KEY = origKey;
-    }
-  });
-
-  it('skips summarization when no observations', async () => {
+  it('skips when no observations', () => {
     const db = getDb(TEST_DB);
     db.run('DELETE FROM observations WHERE session_id = ?', ['sess-1']);
     db.close();
 
-    const result = await handleStop({ session_id: 'sess-1', cwd: '/project' }, TEST_DB);
+    const result = handleStop({ session_id: 'sess-1', cwd: '/project' }, TEST_DB);
     expect(result).toEqual({ continue: true });
   });
 
-  it('returns continue: true always', async () => {
-    delete process.env.ANTHROPIC_API_KEY;
-    const result = await handleStop({ session_id: 'sess-1', cwd: '/project' }, TEST_DB);
+  it('returns continue: true immediately (fire-and-forget)', () => {
+    // handleStop spawns a detached worker — it should return instantly
+    const result = handleStop({ session_id: 'sess-1', cwd: '/project' }, TEST_DB);
+    expect(result).toEqual({ continue: true });
+  });
+
+  it('returns continue: true for unknown session', () => {
+    const result = handleStop({ session_id: 'nonexistent', cwd: '/project' }, TEST_DB);
     expect(result).toEqual({ continue: true });
   });
 });
