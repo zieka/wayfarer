@@ -10,20 +10,24 @@ export function parseStdin(raw: string): Record<string, unknown> | null {
 
 export async function readStdin(): Promise<Record<string, unknown> | null> {
   const chunks: string[] = [];
+  const decoder = new TextDecoder('utf-8', { fatal: false });
   const reader = Bun.stdin.stream().getReader();
 
   try {
+    const timeout = setTimeout(() => reader.cancel(), 5000);
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const text = new TextDecoder().decode(value);
-      chunks.push(text);
-      // Try parsing after each chunk — Claude Code doesn't close stdin
+      chunks.push(decoder.decode(value, { stream: true }));
       const result = parseStdin(chunks.join(''));
-      if (result) return result;
+      if (result) {
+        clearTimeout(timeout);
+        return result;
+      }
     }
+    clearTimeout(timeout);
   } catch {
-    // stdin closed or errored
+    // stdin closed, cancelled, or errored
   }
 
   return parseStdin(chunks.join(''));

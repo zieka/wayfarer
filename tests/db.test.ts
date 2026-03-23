@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect, afterEach } from 'bun:test';
 import { unlinkSync } from 'fs';
-import { getDb, DB_PATH } from '../src/db';
+import { getDb } from '../src/db';
 
 const TEST_DB = '/tmp/wayfarer-test.db';
 

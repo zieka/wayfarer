@@ -21,6 +21,7 @@ function migrate(db: Database): void {
   const { user_version: version } = db.query('PRAGMA user_version').get() as { user_version: number };
 
   if (version < 1) {
+    db.run('BEGIN');
     db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,5 +80,6 @@ function migrate(db: Database): void {
     `);
 
     db.run('PRAGMA user_version = 1');
+    db.run('COMMIT');
   }
 }
