@@ -25,6 +25,30 @@ interface ObservationRow {
   context?: string;
 }
 
+interface SummaryRow {
+  summary: string;
+  files_read: string | null;
+  files_edited: string | null;
+  created_at: number;
+}
+
+function buildSummaryContext(rows: SummaryRow[]): string {
+  const header = '## Recent work in this project\n\n';
+  const blocks = rows.map((row) => {
+    const time = formatTimeAgo(row.created_at);
+    const files = [row.files_read, row.files_edited]
+      .filter(Boolean)
+      .join(',')
+      .split(',')
+      .filter((f, i, arr) => f && arr.indexOf(f) === i)
+      .join(', ');
+    const filesLine = files ? `\nFiles: ${files}` : '';
+    return `**${time}:** ${row.summary}${filesLine}`;
+  }).join('\n\n');
+
+  return `<wayfarer-context>\n${header}${blocks}\n</wayfarer-context>`;
+}
+
 export function buildContext(
   project: string,
   query: string | undefined,
@@ -32,6 +56,22 @@ export function buildContext(
 ): string | null {
   const db = getDb(dbPath);
   try {
+    // Try summaries first (unless we have a specific search query)
+    if (!query) {
+      const summaries = db.query(`
+        SELECT summary, files_read, files_edited, created_at
+        FROM session_summaries
+        WHERE project = ?
+        ORDER BY created_at DESC
+        LIMIT 20
+      `).all(project) as SummaryRow[];
+
+      if (summaries.length > 0) {
+        return buildSummaryContext(summaries);
+      }
+    }
+
+    // Fall back to raw observations
     let rows: ObservationRow[];
 
     if (query) {

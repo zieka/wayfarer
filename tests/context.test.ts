@@ -62,3 +62,37 @@ describe('buildContext', () => {
     expect(ctx).toContain('</wayfarer-context>');
   });
 });
+
+describe('buildContext with summaries', () => {
+  beforeEach(() => {
+    const db = getDb(TEST_DB);
+    seedData(db);
+    const now = Math.floor(Date.now() / 1000);
+    db.run(
+      `INSERT INTO session_summaries (session_id, project, summary, files_read, files_edited, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['s1', '/project', 'Fixed the auth token expiry bug. Added validation and tests.', 'src/auth.ts', 'src/auth.ts,tests/auth.test.ts', now - 3600],
+    );
+    db.close();
+  });
+
+  afterEach(() => {
+    try { unlinkSync(TEST_DB); } catch {}
+    try { unlinkSync(TEST_DB + '-wal'); } catch {}
+    try { unlinkSync(TEST_DB + '-shm'); } catch {}
+  });
+
+  it('prefers summaries over raw observations', () => {
+    const ctx = buildContext('/project', undefined, TEST_DB);
+    expect(ctx).toContain('Fixed the auth token expiry bug');
+    expect(ctx).not.toContain('| Time | Tool |');
+  });
+
+  it('falls back to observations when no summaries', () => {
+    const db = getDb(TEST_DB);
+    db.run('DELETE FROM session_summaries');
+    db.close();
+    const ctx = buildContext('/project', undefined, TEST_DB);
+    expect(ctx).toContain('| Time | Tool |');
+  });
+});
