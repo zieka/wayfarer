@@ -19,7 +19,7 @@ for (const hook of hooks) {
     target: 'esnext',
     format: 'esm',
     minify: false,
-    external: ['bun:sqlite'],
+    external: ['bun:sqlite', 'fastembed', 'onnxruntime-node', '@anush008/tokenizers'],
     banner: { js: '#!/usr/bin/env bun' },
   });
 }
@@ -33,7 +33,7 @@ await build({
   target: 'esnext',
   format: 'esm',
   minify: false,
-  external: ['bun:sqlite'],
+  external: ['bun:sqlite', 'fastembed', 'onnxruntime-node'],
   banner: { js: '#!/usr/bin/env bun' },
 });
 

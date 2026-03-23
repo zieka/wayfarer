@@ -10,5 +10,11 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.0"
-  }
+  },
+  "dependencies": {
+    "fastembed": "^2.1.0"
+  },
+  "trustedDependencies": [
+    "onnxruntime-node"
+  ]
 }

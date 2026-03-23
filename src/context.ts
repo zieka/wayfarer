@@ -111,3 +111,45 @@ export function buildContext(
     db.close();
   }
 }
+
+interface EmbeddingRow {
+  summary_id: number;
+  embedding: Buffer;
+  summary: string;
+  files_read: string | null;
+  files_edited: string | null;
+  created_at: number;
+  project: string;
+}
+
+export async function vectorSearch(
+  query: string,
+  project: string,
+  dbPath?: string,
+): Promise<string | null> {
+  const { getEmbedding, cosineSimilarity } = await import('./embed');
+  const queryEmbedding = await getEmbedding(query);
+
+  const db = getDb(dbPath);
+  try {
+    const rows = db.query(`
+      SELECT e.summary_id, e.embedding, s.summary, s.files_read, s.files_edited, s.created_at, s.project
+      FROM summary_embeddings e
+      JOIN session_summaries s ON s.id = e.summary_id
+      WHERE s.project = ?
+    `).all(project) as EmbeddingRow[];
+
+    if (rows.length === 0) return null;
+
+    const scored = rows.map((row) => {
+      const embedding = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+      return { ...row, score: cosineSimilarity(queryEmbedding, embedding) };
+    }).sort((a, b) => b.score - a.score).slice(0, MAX_RESULTS);
+
+    if (scored[0].score < 0.3) return null;
+
+    return buildSummaryContext(scored);
+  } finally {
+    db.close();
+  }
+}

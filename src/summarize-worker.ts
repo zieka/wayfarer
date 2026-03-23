@@ -74,6 +74,25 @@ try {
     [sessionId, session.project, result.summary, result.files_read, result.files_edited, Math.floor(Date.now() / 1000)],
   );
 
+  // Embed the summary for vector search
+  try {
+    const { getEmbedding } = await import('./embed');
+    const summaryRow = db.query('SELECT id FROM session_summaries WHERE session_id = ?')
+      .get(sessionId) as { id: number } | null;
+
+    if (summaryRow) {
+      const embedding = await getEmbedding(result.summary);
+      const buffer = Buffer.from(embedding.buffer);
+      db.run(
+        'INSERT OR REPLACE INTO summary_embeddings (summary_id, embedding) VALUES (?, ?)',
+        [summaryRow.id, buffer],
+      );
+    }
+  } catch (e) {
+    // Embedding failure is non-fatal — FTS5 search still works
+    console.error(`wayfarer: embedding failed: ${(e as Error).message}`);
+  }
+
   db.close();
 } catch (e) {
   console.error(`wayfarer: summarize-worker failed: ${(e as Error).message}`);

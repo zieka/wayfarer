@@ -63,12 +63,21 @@ describe('getDb', () => {
     db.close();
   });
 
+  it('creates summary_embeddings table', () => {
+    const db = getDb(TEST_DB);
+    const tables = db.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='summary_embeddings'"
+    ).get() as { name: string } | null;
+    expect(tables?.name).toBe('summary_embeddings');
+    db.close();
+  });
+
   it('runs migrations idempotently', () => {
     const db1 = getDb(TEST_DB);
     db1.close();
     const db2 = getDb(TEST_DB);
     const version = db2.query("PRAGMA user_version").get() as { user_version: number };
-    expect(version.user_version).toBe(2);
+    expect(version.user_version).toBe(3);
     db2.close();
   });
 });

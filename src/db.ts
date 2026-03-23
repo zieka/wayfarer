@@ -131,4 +131,19 @@ function migrate(db: Database): void {
     db.run('PRAGMA user_version = 2');
     db.run('COMMIT');
   }
+
+  if (version < 3) {
+    db.run('BEGIN');
+    db.run(`
+      CREATE TABLE IF NOT EXISTS summary_embeddings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        summary_id INTEGER UNIQUE NOT NULL,
+        embedding BLOB NOT NULL,
+        FOREIGN KEY (summary_id) REFERENCES session_summaries(id) ON DELETE CASCADE
+      )
+    `);
+    db.run('CREATE INDEX IF NOT EXISTS idx_embeddings_summary ON summary_embeddings(summary_id)');
+    db.run('PRAGMA user_version = 3');
+    db.run('COMMIT');
+  }
 }
