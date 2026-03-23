@@ -1,0 +1,13 @@
+{
+  "name": "wayfarer",
+  "version": "0.1.0",
+  "description": "Persistent memory for Claude Code — lightweight, no daemon",
+  "type": "module",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
