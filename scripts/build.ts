@@ -7,6 +7,7 @@ const hooks = [
   'session-start',
   'user-prompt-submit',
   'post-tool-use',
+  'stop',
 ];
 
 for (const hook of hooks) {
