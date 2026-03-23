@@ -1,0 +1,18 @@
+{
+  "name": "wayfarer",
+  "description": "Persistent memory for Claude Code",
+  "owner": {
+    "name": "Kyle Scully"
+  },
+  "plugins": [
+    {
+      "name": "wayfarer",
+      "description": "Persistent memory for Claude Code — lightweight, no daemon",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Kyle Scully"
+      }
+    }
+  ]
+}
