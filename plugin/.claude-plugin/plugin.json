@@ -1,0 +1,9 @@
+{
+  "name": "wayfarer",
+  "version": "0.1.0",
+  "description": "Persistent memory for Claude Code — lightweight, no daemon",
+  "author": {
+    "name": "Kyle Scully"
+  },
+  "license": "MIT"
+}
