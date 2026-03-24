@@ -1,10 +1,15 @@
 import { EmbeddingModel, FlagEmbedding } from 'fastembed';
+import { join } from 'path';
+import { DATA_DIR } from './db';
 
 let model: FlagEmbedding | null = null;
 
 export async function getEmbedding(text: string): Promise<Float32Array> {
   if (!model) {
-    model = await FlagEmbedding.init({ model: EmbeddingModel.BGESmallENV15 });
+    model = await FlagEmbedding.init({
+      model: EmbeddingModel.BGESmallENV15,
+      cacheDir: join(DATA_DIR, 'models'),
+    });
   }
   const results = await model.embed([text]);
   for await (const batch of results) {
