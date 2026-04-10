@@ -2,3 +2,4 @@ node_modules/
 dist/
 plugin/scripts/
 local_cache/
+.moderne/
