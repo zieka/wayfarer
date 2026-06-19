@@ -1,5 +1,5 @@
 import { readStdin } from '../stdin';
-import { buildContext } from '../context';
+import { primerForSession } from '../retrieve';
 import type { HookResponse } from './user-prompt-submit';
 
 export function handleSessionStart(
@@ -8,7 +8,7 @@ export function handleSessionStart(
 ): HookResponse {
   const project = (input.cwd ?? process.cwd()) as string;
 
-  const context = buildContext(project, undefined, dbPath);
+  const context = primerForSession(project, dbPath);
 
   if (context) {
     return {
