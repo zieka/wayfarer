@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { estimateTokens, getBudget, fitToBudget, toFtsQuery } from '../src/retrieve';
 
 describe('estimateTokens', () => {
@@ -10,6 +10,14 @@ describe('estimateTokens', () => {
 });
 
 describe('getBudget', () => {
+  const ENV_KEY = 'WAYFARER_CONTEXT_TOKEN_BUDGET';
+  let original: string | undefined;
+  beforeEach(() => { original = process.env[ENV_KEY]; });
+  afterEach(() => {
+    if (original === undefined) delete process.env[ENV_KEY];
+    else process.env[ENV_KEY] = original;
+  });
+
   it('defaults to 1200 when env unset', () => {
     delete process.env.WAYFARER_CONTEXT_TOKEN_BUDGET;
     expect(getBudget()).toBe(1200);
@@ -39,6 +47,10 @@ describe('fitToBudget', () => {
   });
   it('always returns at least the first item even if it exceeds budget', () => {
     expect(fitToBudget([500, 10], 100, size)).toEqual([500]);
+  });
+  it('includes a zero-cost item at exactly the budget but stops before exceeding', () => {
+    expect(fitToBudget([60, 40, 0], 100, size)).toEqual([60, 40, 0]);
+    expect(fitToBudget([60, 40, 1], 100, size)).toEqual([60, 40]);
   });
 });
 

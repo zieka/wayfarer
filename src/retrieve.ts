@@ -23,7 +23,6 @@ export function fitToBudget<T>(items: T[], budget: number, sizeOf: (item: T) => 
     if (out.length > 0 && total + size > budget) break;
     out.push(item);
     total += size;
-    if (total >= budget) break;
   }
   return out;
 }
