@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { estimateTokens, getBudget, fitToBudget, toFtsQuery } from '../src/retrieve';
+import {
+  estimateTokens, getBudget, fitToBudget, toFtsQuery,
+  formatSummaryContext, formatObservationContext, budgetSummaries,
+  type SummaryItem, type ObsRow,
+} from '../src/retrieve';
 
 describe('estimateTokens', () => {
   it('is chars/4 rounded up', () => {
@@ -64,5 +68,49 @@ describe('toFtsQuery', () => {
   it('neutralizes FTS operators and punctuation', () => {
     // parens/quotes/colons must not reach MATCH as syntax
     expect(toFtsQuery('foo("bar"): baz')).toBe('"foo" OR "bar" OR "baz"');
+  });
+});
+
+const NOW = Math.floor(Date.now() / 1000);
+
+describe('formatSummaryContext', () => {
+  it('wraps blocks with header and context tags, dedupes files', () => {
+    const items: SummaryItem[] = [
+      { summary: 'Fixed auth bug.', files_read: 'src/auth.ts', files_edited: 'src/auth.ts,tests/auth.test.ts', created_at: NOW - 3600 },
+    ];
+    const out = formatSummaryContext(items, 'Relevant past work');
+    expect(out).toContain('<wayfarer-context>');
+    expect(out).toContain('## Relevant past work');
+    expect(out).toContain('Fixed auth bug.');
+    expect(out).toContain('Files: src/auth.ts, tests/auth.test.ts');
+    expect(out).toContain('</wayfarer-context>');
+  });
+});
+
+describe('formatObservationContext', () => {
+  it('renders the markdown table', () => {
+    const rows: ObsRow[] = [
+      { tool_name: 'Edit', files_touched: 'src/auth.ts', created_at: NOW - 3600, context: 'edited auth' },
+    ];
+    const out = formatObservationContext(rows);
+    expect(out).toContain('| Time | Tool | Files | Context |');
+    expect(out).toContain('| Edit |');
+    expect(out).toContain('src/auth.ts');
+  });
+});
+
+describe('budgetSummaries', () => {
+  it('drops items beyond the budget', () => {
+    const mk = (i: number): SummaryItem => ({ summary: 'x'.repeat(400), files_read: null, files_edited: null, created_at: NOW - i });
+    const items = [mk(1), mk(2), mk(3), mk(4)];
+    const fit = budgetSummaries(items, 200); // ~100 tokens each block; only ~2 fit
+    expect(fit.length).toBeGreaterThanOrEqual(1);
+    expect(fit.length).toBeLessThan(items.length);
+  });
+  it('truncates a single oversized summary to fit', () => {
+    const huge: SummaryItem = { summary: 'y'.repeat(20000), files_read: null, files_edited: null, created_at: NOW };
+    const fit = budgetSummaries([huge], 100);
+    expect(fit).toHaveLength(1);
+    expect(fit[0].summary.length).toBeLessThan(20000);
   });
 });
