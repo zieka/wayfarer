@@ -105,6 +105,109 @@ export function budgetSummaries(items: SummaryItem[], budget: number): SummaryIt
   return fit;
 }
 
+interface ScoredSummary extends SummaryItem {
+  summary_id: number;
+  score?: number;
+}
+
+async function vectorCandidates(
+  db: ReturnType<typeof getDb>,
+  project: string,
+  prompt: string,
+  embed?: (text: string) => Promise<Float32Array>,
+): Promise<ScoredSummary[]> {
+  try {
+    const embedFn = embed ?? (await import('./embed')).getEmbedding;
+    const { cosineSimilarity } = await import('./embed');
+    const queryEmbedding = await embedFn(prompt.slice(0, MAX_PROMPT_CHARS));
+
+    const rows = db.query(`
+      SELECT e.summary_id, e.embedding, s.summary, s.files_read, s.files_edited, s.created_at
+      FROM summary_embeddings e
+      JOIN session_summaries s ON s.id = e.summary_id
+      WHERE s.project = ?
+    `).all(project) as (ScoredSummary & { embedding: Buffer })[];
+
+    return rows
+      .map((r) => {
+        const emb = new Float32Array(r.embedding.buffer, r.embedding.byteOffset, r.embedding.byteLength / 4);
+        return { ...r, score: cosineSimilarity(queryEmbedding, emb) };
+      })
+      .filter((r) => (r.score ?? 0) >= VECTOR_THRESHOLD)
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .slice(0, CANDIDATE_CAP);
+  } catch {
+    return [];
+  }
+}
+
+export async function relevantForPrompt(
+  project: string,
+  prompt: string,
+  opts: { dbPath?: string; embed?: (text: string) => Promise<Float32Array> } = {},
+): Promise<string | null> {
+  const db = getDb(opts.dbPath);
+  try {
+    const budget = getBudget();
+    const now = Math.floor(Date.now() / 1000);
+    const ftsQuery = toFtsQuery(prompt.slice(0, MAX_PROMPT_CHARS));
+
+    let candidates: ScoredSummary[] = [];
+    if (ftsQuery) {
+      try {
+        candidates = db.query(`
+          SELECT s.id AS summary_id, s.summary, s.files_read, s.files_edited, s.created_at
+          FROM session_summaries_fts
+          JOIN session_summaries s ON s.id = session_summaries_fts.rowid
+          WHERE session_summaries_fts MATCH ? AND s.project = ?
+          ORDER BY (rank * -1.0) * (1.0 / (1.0 + (? - s.created_at) / 86400.0)) DESC
+          LIMIT ?
+        `).all(ftsQuery, project, now, CANDIDATE_CAP) as ScoredSummary[];
+      } catch {
+        candidates = [];
+      }
+    }
+
+    if (candidates.length < MIN_FTS_RESULTS) {
+      const vec = await vectorCandidates(db, project, prompt, opts.embed);
+      const seen = new Set(candidates.map((c) => c.summary_id));
+      for (const v of vec) {
+        if (!seen.has(v.summary_id)) {
+          candidates.push(v);
+          seen.add(v.summary_id);
+        }
+      }
+    }
+
+    if (candidates.length > 0) {
+      return formatSummaryContext(budgetSummaries(candidates, budget), 'Relevant past work');
+    }
+
+    if (ftsQuery) {
+      try {
+        const rows = db.query(`
+          SELECT o.tool_name, o.files_touched, o.created_at,
+                 snippet(observations_fts, 1, '', '', '...', 32) AS context
+          FROM observations_fts
+          JOIN observations o ON o.id = observations_fts.rowid
+          WHERE observations_fts MATCH ? AND o.project = ?
+          ORDER BY (rank * -1.0) * (1.0 / (1.0 + (? - o.created_at) / 86400.0)) DESC
+          LIMIT ?
+        `).all(ftsQuery, project, now, CANDIDATE_CAP) as ObsRow[];
+        if (rows.length > 0) {
+          return formatObservationContext(fitToBudget(rows, budget, (r) => estimateTokens(obsLine(r))));
+        }
+      } catch {
+        // ignore FTS errors — never block a prompt
+      }
+    }
+
+    return null;
+  } finally {
+    db.close();
+  }
+}
+
 export function primerForSession(project: string, dbPath?: string): string | null {
   const db = getDb(dbPath);
   try {

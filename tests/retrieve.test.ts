@@ -5,6 +5,7 @@ import {
   formatSummaryContext, formatObservationContext, budgetSummaries,
   type SummaryItem, type ObsRow,
   primerForSession,
+  relevantForPrompt,
 } from '../src/retrieve';
 import { getDb } from '../src/db';
 
@@ -164,5 +165,90 @@ describe('primerForSession', () => {
     const db = getDb(PRIMER_DB);
     db.close();
     expect(primerForSession('/nope', PRIMER_DB)).toBeNull();
+  });
+});
+
+const REL_DB = '/tmp/wayfarer-test-rel.db';
+
+function insertSummary(db: ReturnType<typeof getDb>, id: number, sid: string, summary: string, createdAt: number) {
+  db.run('INSERT INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', [sid, '/p', 'x', createdAt]);
+  db.run(
+    `INSERT INTO session_summaries (id, session_id, project, summary, files_read, files_edited, created_at)
+     VALUES (?,?,?,?,?,?,?)`,
+    [id, sid, '/p', summary, null, null, createdAt],
+  );
+}
+
+function insertEmbedding(db: ReturnType<typeof getDb>, summaryId: number, vec: number[]) {
+  const buf = Buffer.from(new Float32Array(vec).buffer);
+  db.run('INSERT INTO summary_embeddings (summary_id, embedding) VALUES (?, ?)', [summaryId, buf]);
+}
+
+describe('relevantForPrompt', () => {
+  afterEach(() => cleanup(REL_DB));
+
+  it('returns FTS5 keyword matches without invoking the embedder', async () => {
+    const db = getDb(REL_DB);
+    const now = Math.floor(Date.now() / 1000);
+    insertSummary(db, 1, 's1', 'Refactored the authentication token logic.', now - 100);
+    insertSummary(db, 2, 's2', 'Updated the billing invoice renderer.', now - 200);
+    insertSummary(db, 3, 's3', 'Tuned authentication retries and timeouts.', now - 300);
+    insertSummary(db, 4, 's4', 'Reworked authentication session storage.', now - 400);
+    db.close();
+    let embedCalled = false;
+    const out = await relevantForPrompt('/p', 'authentication problem', {
+      dbPath: REL_DB,
+      embed: async () => { embedCalled = true; return new Float32Array([1, 0, 0]); },
+    });
+    expect(out).toContain('## Relevant past work');
+    expect(out).toContain('authentication');
+    expect(embedCalled).toBe(false);
+  });
+
+  it('falls back to vector search when FTS5 is weak', async () => {
+    const db = getDb(REL_DB);
+    const now = Math.floor(Date.now() / 1000);
+    insertSummary(db, 1, 's1', 'Refactored the deployment pipeline.', now - 100);
+    insertSummary(db, 2, 's2', 'Adjusted the caching layer.', now - 200);
+    insertEmbedding(db, 1, [1, 0, 0]); // close to query vector
+    insertEmbedding(db, 2, [0, 1, 0]); // orthogonal -> below threshold
+    db.close();
+    const out = await relevantForPrompt('/p', 'zzz qqq', {
+      dbPath: REL_DB,
+      embed: async () => new Float32Array([1, 0, 0]),
+    });
+    expect(out).toContain('## Relevant past work');
+    expect(out).toContain('deployment pipeline');
+    expect(out).not.toContain('caching layer');
+  });
+
+  it('returns null when nothing matches and no embeddings exist', async () => {
+    const db = getDb(REL_DB);
+    const now = Math.floor(Date.now() / 1000);
+    insertSummary(db, 1, 's1', 'Adjusted the caching layer.', now - 100);
+    db.close();
+    const out = await relevantForPrompt('/p', 'zzz qqq', {
+      dbPath: REL_DB,
+      embed: async () => new Float32Array([0, 0, 1]),
+    });
+    expect(out).toBeNull();
+  });
+
+  it('falls back to observation FTS when a keyword hits only observations', async () => {
+    const db = getDb(REL_DB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s1', '/p', 'x', now]);
+    db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s1', '/p', 'Bash', 'pytest tests/widget_test.py', 'ok', null, now - 60],
+    );
+    db.close();
+    const out = await relevantForPrompt('/p', 'widget', {
+      dbPath: REL_DB,
+      embed: async () => new Float32Array([0, 0, 1]),
+    });
+    expect(out).toContain('| Time | Tool |');
+    expect(out).toContain('widget');
   });
 });
