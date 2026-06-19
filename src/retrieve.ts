@@ -102,3 +102,38 @@ export function budgetSummaries(items: SummaryItem[], budget: number): SummaryIt
   }
   return fit;
 }
+
+import { getDb } from './db';
+
+export function primerForSession(project: string, dbPath?: string): string | null {
+  const db = getDb(dbPath);
+  try {
+    const budget = getBudget();
+
+    const summaries = db.query(`
+      SELECT summary, files_read, files_edited, created_at
+      FROM session_summaries
+      WHERE project = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(project, CANDIDATE_CAP) as SummaryItem[];
+
+    if (summaries.length > 0) {
+      return formatSummaryContext(budgetSummaries(summaries, budget), 'Recent work in this project');
+    }
+
+    const rows = db.query(`
+      SELECT tool_name, files_touched, created_at, tool_input AS context
+      FROM observations
+      WHERE project = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(project, CANDIDATE_CAP) as ObsRow[];
+
+    if (rows.length === 0) return null;
+    const fit = fitToBudget(rows, budget, (r) => estimateTokens(obsLine(r)));
+    return formatObservationContext(fit);
+  } finally {
+    db.close();
+  }
+}

@@ -1,9 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { unlinkSync } from 'fs';
 import {
   estimateTokens, getBudget, fitToBudget, toFtsQuery,
   formatSummaryContext, formatObservationContext, budgetSummaries,
   type SummaryItem, type ObsRow,
+  primerForSession,
 } from '../src/retrieve';
+import { getDb } from '../src/db';
 
 describe('estimateTokens', () => {
   it('is chars/4 rounded up', () => {
@@ -112,5 +115,53 @@ describe('budgetSummaries', () => {
     const fit = budgetSummaries([huge], 100);
     expect(fit).toHaveLength(1);
     expect(fit[0].summary.length).toBeLessThan(20000);
+  });
+});
+
+const PRIMER_DB = '/tmp/wayfarer-test-primer.db';
+
+function cleanup(path: string) {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { unlinkSync(path + suffix); } catch {}
+  }
+}
+
+describe('primerForSession', () => {
+  afterEach(() => cleanup(PRIMER_DB));
+
+  it('returns a budgeted summary block when summaries exist', () => {
+    const db = getDb(PRIMER_DB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s1', '/p', 'x', now]);
+    db.run(
+      `INSERT INTO session_summaries (session_id, project, summary, files_read, files_edited, created_at)
+       VALUES (?,?,?,?,?,?)`,
+      ['s1', '/p', 'Fixed the auth token expiry bug.', 'src/auth.ts', 'src/auth.ts', now - 3600],
+    );
+    db.close();
+    const out = primerForSession('/p', PRIMER_DB);
+    expect(out).toContain('## Recent work in this project');
+    expect(out).toContain('Fixed the auth token expiry bug.');
+  });
+
+  it('falls back to observations when no summaries', () => {
+    const db = getDb(PRIMER_DB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s1', '/p', 'x', now]);
+    db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s1', '/p', 'Edit', 'edited auth.ts', 'ok', 'src/auth.ts', now - 60],
+    );
+    db.close();
+    const out = primerForSession('/p', PRIMER_DB);
+    expect(out).toContain('| Time | Tool |');
+    expect(out).toContain('auth.ts');
+  });
+
+  it('returns null for an empty project', () => {
+    const db = getDb(PRIMER_DB);
+    db.close();
+    expect(primerForSession('/nope', PRIMER_DB)).toBeNull();
   });
 });
