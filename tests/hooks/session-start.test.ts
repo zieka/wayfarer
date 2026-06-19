@@ -44,4 +44,12 @@ describe('handleSessionStart', () => {
     const result = handleSessionStart({ session_id: 'new-sess', cwd: '/whatever' }, TEST_DB);
     expect(result.continue).toBe(true);
   });
+
+  it('never throws and returns { continue: true } when getDb fails (directory as dbPath)', () => {
+    // Passing a directory path forces bun:sqlite to fail when opening the DB,
+    // which exercises the try/catch guard in handleSessionStart.
+    const result = handleSessionStart({ session_id: 'new-sess', cwd: '/project' }, '/tmp');
+    expect(result.continue).toBe(true);
+    expect(result.hookSpecificOutput).toBeUndefined();
+  });
 });

@@ -107,7 +107,7 @@ describe('budgetSummaries', () => {
   it('drops items beyond the budget', () => {
     const mk = (i: number): SummaryItem => ({ summary: 'x'.repeat(400), files_read: null, files_edited: null, created_at: NOW - i });
     const items = [mk(1), mk(2), mk(3), mk(4)];
-    const fit = budgetSummaries(items, 200); // ~100 tokens each block; only ~2 fit
+    const fit = budgetSummaries(items, 200); // ~100 tokens each block; only ~1 fits
     expect(fit.length).toBeGreaterThanOrEqual(1);
     expect(fit.length).toBeLessThan(items.length);
   });

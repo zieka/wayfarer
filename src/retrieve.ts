@@ -69,6 +69,7 @@ function dedupeFiles(read: string | null, edited: string | null): string {
     .filter(Boolean)
     .join(',')
     .split(',')
+    .map((f) => f.trim())
     .filter((f, i, arr) => f && arr.indexOf(f) === i)
     .join(', ');
 }
@@ -117,8 +118,9 @@ async function vectorCandidates(
   embed?: (text: string) => Promise<Float32Array>,
 ): Promise<ScoredSummary[]> {
   try {
-    const embedFn = embed ?? (await import('./embed')).getEmbedding;
-    const { cosineSimilarity } = await import('./embed');
+    const mod = await import('./embed');
+    const embedFn = embed ?? mod.getEmbedding;
+    const { cosineSimilarity } = mod;
     const queryEmbedding = await embedFn(prompt.slice(0, MAX_PROMPT_CHARS));
 
     const rows = db.query(`

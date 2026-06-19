@@ -41,7 +41,7 @@ export async function handleUserPromptSubmit(
         };
       }
     } catch (e) {
-      console.error(`wayfarer: relevant-context lookup failed: ${(e as Error).message}`);
+      console.error(`wayfarer: relevant-context lookup failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -57,7 +57,7 @@ if (import.meta.main) {
       process.stdout.write(JSON.stringify(result));
     }
   } catch (e) {
-    console.error(`wayfarer: user-prompt-submit failed: ${(e as Error).message}`);
+    console.error(`wayfarer: user-prompt-submit failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   process.exit(0);
 }
