@@ -1,3 +1,5 @@
+import { getDb } from './db';
+
 const DEFAULT_BUDGET = 1200;
 export const CANDIDATE_CAP = 30;
 export const MIN_FTS_RESULTS = 3;
@@ -102,8 +104,6 @@ export function budgetSummaries(items: SummaryItem[], budget: number): SummaryIt
   }
   return fit;
 }
-
-import { getDb } from './db';
 
 export function primerForSession(project: string, dbPath?: string): string | null {
   const db = getDb(dbPath);

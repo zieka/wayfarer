@@ -127,6 +127,7 @@ function cleanup(path: string) {
 }
 
 describe('primerForSession', () => {
+  beforeEach(() => cleanup(PRIMER_DB));
   afterEach(() => cleanup(PRIMER_DB));
 
   it('returns a budgeted summary block when summaries exist', () => {
