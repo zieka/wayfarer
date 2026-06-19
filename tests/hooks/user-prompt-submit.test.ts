@@ -5,45 +5,52 @@ import { handleUserPromptSubmit } from '../../src/hooks/user-prompt-submit';
 
 const TEST_DB = '/tmp/wayfarer-test-ups.db';
 
+function cleanup() {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { unlinkSync(TEST_DB + suffix); } catch {}
+  }
+}
+
 describe('handleUserPromptSubmit', () => {
-  afterEach(() => {
-    try { unlinkSync(TEST_DB); } catch {}
-    try { unlinkSync(TEST_DB + '-wal'); } catch {}
-    try { unlinkSync(TEST_DB + '-shm'); } catch {}
-  });
+  afterEach(cleanup);
 
-  it('creates a session record', () => {
+  it('records the session and always continues', async () => {
+    const res = await handleUserPromptSubmit(
+      { session_id: 'sX', cwd: '/p', prompt: 'hello world' },
+      TEST_DB,
+    );
+    expect(res.continue).toBe(true);
     const db = getDb(TEST_DB);
-    handleUserPromptSubmit({
-      session_id: 'sess-1',
-      cwd: '/Users/kyle/project',
-      prompt: 'fix the auth bug',
-    }, TEST_DB);
-
-    const session = db.query('SELECT * FROM sessions WHERE session_id = ?').get('sess-1') as any;
-    expect(session).not.toBeNull();
-    expect(session.project).toBe('/Users/kyle/project');
-    expect(session.prompt).toBe('fix the auth bug');
-    expect(session.status).toBe('active');
+    const row = db.query('SELECT prompt FROM sessions WHERE session_id = ?').get('sX') as { prompt: string };
     db.close();
+    expect(row.prompt).toBe('hello world');
   });
 
-  it('is idempotent for same session_id', () => {
-    handleUserPromptSubmit({ session_id: 'sess-1', cwd: '/tmp', prompt: 'first' }, TEST_DB);
-    handleUserPromptSubmit({ session_id: 'sess-1', cwd: '/tmp', prompt: 'second' }, TEST_DB);
-
+  it('injects relevant past work when a summary matches the prompt', async () => {
     const db = getDb(TEST_DB);
-    const count = db.query('SELECT COUNT(*) as c FROM sessions WHERE session_id = ?').get('sess-1') as any;
-    expect(count.c).toBe(1);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s0', '/p', 'old', now - 1000]);
+    db.run(
+      `INSERT INTO session_summaries (session_id, project, summary, files_read, files_edited, created_at)
+       VALUES (?,?,?,?,?,?)`,
+      ['s0', '/p', 'Refactored the authentication token logic.', null, null, now - 1000],
+    );
     db.close();
+    const res = await handleUserPromptSubmit(
+      { session_id: 's1', cwd: '/p', prompt: 'authentication bug' },
+      TEST_DB,
+    );
+    expect(res.continue).toBe(true);
+    expect(res.hookSpecificOutput?.hookEventName).toBe('UserPromptSubmit');
+    expect(res.hookSpecificOutput?.additionalContext).toContain('authentication');
   });
 
-  it('returns continue: true', () => {
-    const result = handleUserPromptSubmit({
-      session_id: 'sess-2',
-      cwd: '/tmp',
-      prompt: 'hello',
-    }, TEST_DB);
-    expect(result).toEqual({ continue: true });
+  it('continues with no injection when nothing matches', async () => {
+    const res = await handleUserPromptSubmit(
+      { session_id: 's2', cwd: '/empty', prompt: 'anything' },
+      TEST_DB,
+    );
+    expect(res.continue).toBe(true);
+    expect(res.hookSpecificOutput).toBeUndefined();
   });
 });

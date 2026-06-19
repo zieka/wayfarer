@@ -1,5 +1,6 @@
 import { readStdin } from '../stdin';
 import { getDb } from '../db';
+import { relevantForPrompt } from '../retrieve';
 
 export interface HookResponse {
   continue: boolean;
@@ -9,10 +10,10 @@ export interface HookResponse {
   };
 }
 
-export function handleUserPromptSubmit(
+export async function handleUserPromptSubmit(
   input: Record<string, unknown>,
   dbPath?: string,
-): HookResponse {
+): Promise<HookResponse> {
   const sessionId = (input.session_id ?? input.id ?? input.sessionId) as string;
   const project = (input.cwd ?? process.cwd()) as string;
   const prompt = (input.prompt ?? null) as string | null;
@@ -27,6 +28,23 @@ export function handleUserPromptSubmit(
     db.close();
   }
 
+  if (prompt) {
+    try {
+      const context = await relevantForPrompt(project, prompt, { dbPath });
+      if (context) {
+        return {
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: context,
+          },
+        };
+      }
+    } catch (e) {
+      console.error(`wayfarer: relevant-context lookup failed: ${(e as Error).message}`);
+    }
+  }
+
   return { continue: true };
 }
 
@@ -35,7 +53,7 @@ if (import.meta.main) {
   try {
     const input = await readStdin();
     if (input) {
-      const result = handleUserPromptSubmit(input);
+      const result = await handleUserPromptSubmit(input);
       process.stdout.write(JSON.stringify(result));
     }
   } catch (e) {
