@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-19
 **Status:** Approved design — ready for implementation plan
-**Feature:** #1 of the Wayfarer token-efficiency roadmap (mined from `~/Repos/headroom`)
+**Feature:** #1 of the Wayfarer token-efficiency roadmap
 
 ## Goal
 
