@@ -1,5 +1,5 @@
 import { readStdin } from '../stdin';
-import { buildContext } from '../context';
+import { primerForSession } from '../retrieve';
 import type { HookResponse } from './user-prompt-submit';
 
 export function handleSessionStart(
@@ -8,16 +8,20 @@ export function handleSessionStart(
 ): HookResponse {
   const project = (input.cwd ?? process.cwd()) as string;
 
-  const context = buildContext(project, undefined, dbPath);
+  try {
+    const context = primerForSession(project, dbPath);
 
-  if (context) {
-    return {
-      continue: true,
-      hookSpecificOutput: {
-        hookEventName: 'SessionStart',
-        additionalContext: context,
-      },
-    };
+    if (context) {
+      return {
+        continue: true,
+        hookSpecificOutput: {
+          hookEventName: 'SessionStart',
+          additionalContext: context,
+        },
+      };
+    }
+  } catch (e) {
+    console.error(`wayfarer: session-start failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   return { continue: true };
@@ -29,7 +33,7 @@ if (import.meta.main) {
     const result = handleSessionStart(input ?? { cwd: process.cwd() });
     process.stdout.write(JSON.stringify(result));
   } catch (e) {
-    console.error(`wayfarer: session-start failed: ${(e as Error).message}`);
+    console.error(`wayfarer: session-start failed: ${e instanceof Error ? e.message : String(e)}`);
   }
   process.exit(0);
 }
