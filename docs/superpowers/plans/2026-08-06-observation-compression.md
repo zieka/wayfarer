@@ -557,10 +557,13 @@ git commit -m "feat: observation_originals table (v4) and TTL prune"
 
   // Constraint 1: file-path extraction runs on the ORIGINAL input, before compression.
   it('extracts files_touched from a path in the compressed-away middle of a large input', () => {
-    const head = Array.from({ length: 60 }, (_, i) => `prefix line ${i}`);
+    // Pad each line so the document comfortably exceeds the 2048-char threshold
+    // (otherwise compression won't trigger and the assertions below are vacuous).
+    const pad = '.'.repeat(20);
+    const head = Array.from({ length: 60 }, (_, i) => `prefix line ${i} ${pad}`);
     const buried = 'see /tmp/project/src/deep/buried.ts for details';
-    const tail = Array.from({ length: 60 }, (_, i) => `suffix line ${i}`);
-    const bigInput = [...head, buried, ...tail].join('\n'); // > 2KB, path is mid-document
+    const tail = Array.from({ length: 60 }, (_, i) => `suffix line ${i} ${pad}`);
+    const bigInput = [...head, buried, ...tail].join('\n'); // ~4KB; buried path at line 60 (in the dropped middle)
 
     handlePostToolUse({
       session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Read',
