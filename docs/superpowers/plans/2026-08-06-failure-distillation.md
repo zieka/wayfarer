@@ -612,4 +612,94 @@ git commit -m "feat: distill error→recovery pairs into deduped corrections"
 
 ---
 
+### Task 5: Wire distillation into the summarize-worker
+
+**Files:**
+- Modify: `src/summarize-worker.ts`
+
+**Interfaces:**
+- Consumes: `distillCorrections`, `RecoveryPair` (Task 4).
+- Produces: a guarded distillation step + a local `distillPhrase` (`claude -p`) function. No new exports.
+- **Decoupling requirement:** the step runs in its OWN `try/catch`, placed AFTER the session lookup but BEFORE summary generation, so (a) a summary `claude -p` failure cannot skip it, and (b) its own failure cannot affect the summary or the prune. It is gated inside `distillCorrections` (no error→recovery pair → no `claude` call).
+
+Not unit-tested here: the worker is a detached script that spawns `claude` (like the existing summary/prune paths). The pairing + dedup logic is already unit-tested in Task 4; this task's verification is type-check + build + a placement check + the full suite.
+
+- [ ] **Step 1: Add the import**
+
+In `src/summarize-worker.ts`, extend the distill import:
+```ts
+import { distillCorrections, type RecoveryPair } from './distill';
+```
+(Keep the existing imports, including `pruneOriginals` from `./compress` and `spawn` from `child_process`.)
+
+- [ ] **Step 2: Add the distillation prompt + `distillPhrase`**
+
+After the `SYSTEM_PROMPT` declaration, add:
+```ts
+const DISTILL_PROMPT = `You are distilling durable "pitfall" corrections from a coding session. You are given error→recovery pairs: a tool call that FAILED, then a later call on the same target that SUCCEEDED. For each pair where the recovery clearly shows how to avoid the original failure, output ONE terse imperative correction (max ~20 words). If a pair does not clearly imply a reusable fix, omit it. Respond with ONLY a JSON array of strings, e.g. ["Run npm ci before npm test."]. No prose, no fencing.`;
+
+async function distillPhrase(pairs: RecoveryPair[]): Promise<string[]> {
+  const payload = pairs.map((p, i) => ({
+    n: i + 1,
+    tool: p.error.tool_name,
+    failed_input: p.error.tool_input.slice(0, 500),
+    error_output: p.error.tool_output.slice(0, 500),
+    recovery_input: p.recovery.tool_input.slice(0, 500),
+  }));
+  const prompt = `${DISTILL_PROMPT}\n\nPairs:\n${JSON.stringify(payload, null, 2)}`;
+  const responseText = await new Promise<string>((resolve, reject) => {
+    const child = spawn('claude', ['-p', prompt], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on('data', () => {});
+    child.on('close', (code) => {
+      if (code === 0 && stdout.trim()) resolve(stdout.trim());
+      else reject(new Error(`claude -p exited with code ${code}`));
+    });
+    child.on('error', reject);
+  });
+  try {
+    const parsed = JSON.parse(responseText);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return []; // unparseable model output → no corrections (conservative)
+  }
+}
+```
+
+- [ ] **Step 3: Insert the guarded distillation step (before summary generation)**
+
+In `src/summarize-worker.ts`, immediately AFTER the `if (!session) { db.close(); process.exit(0); }` block and BEFORE the `const observations = …` summary load, insert:
+```ts
+  // Distill error→recovery corrections. Independently guarded and placed BEFORE summary
+  // generation: a summary failure can't skip it, and its own failure can't touch the
+  // summary or the prune. Gated inside distillCorrections — no pair → no claude call.
+  try {
+    await distillCorrections(db, sessionId, session.project, distillPhrase);
+  } catch (e) {
+    console.error(`wayfarer: distillation failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+```
+Leave the prune (top), the summary generation, the embedding, and `db.close()` exactly as they are.
+
+- [ ] **Step 4: Verify placement + decoupling**
+
+Run: `grep -n "distillCorrections\|spawn('claude'\|pruneOriginals" src/summarize-worker.ts`
+Expected order (top to bottom): `pruneOriginals` (prune, top) → `distillCorrections` (distillation) → `spawn('claude'` appears twice: once inside `distillPhrase` (a function defined above, but its CALL is via `distillCorrections`) and once for the summary. Confirm the `distillCorrections(...)` call line sits ABOVE the summary's `const responseText = await new Promise(...) spawn('claude'…)` block, and that it is wrapped in its own `try/catch`. This proves a summary failure (which throws to the outer catch) cannot skip distillation.
+
+- [ ] **Step 5: Type-check, build, full suite**
+
+Run: `bun run typecheck` — exits 0.
+Run: `bun run build` — succeeds (type-check gate passes, then `Built …`).
+Run: `bun test` — `N pass, 0 fail` (unchanged; the worker isn't unit-tested, so counts hold; ignore the trailing Bun panic).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/summarize-worker.ts
+git commit -m "feat: distill corrections in the worker, decoupled from summary and prune"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
