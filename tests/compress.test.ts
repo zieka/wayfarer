@@ -1,8 +1,11 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, afterEach } from 'bun:test';
+import { unlinkSync } from 'fs';
+import { getDb } from '../src/db';
 import {
   getCompressThreshold, getOriginalsTtlDays, hardTruncate, compressGeneric,
   MAX_COMPRESSED_CHARS, HEAD_LINES, TAIL_LINES,
   pickStrategy, compressLog, compressField, compressForStorage,
+  pruneOriginals,
 } from '../src/compress';
 
 describe('getCompressThreshold', () => {
@@ -159,5 +162,51 @@ describe('compressForStorage', () => {
     expect(r.input.compressed).toBe(false);
     expect(r.output.compressed).toBe(true);
     expect(r.output.text.length).toBeLessThan(bigLog.length);
+  });
+});
+
+const PRUNE_DB = '/tmp/wayfarer-test-prune.db';
+
+function cleanupPrune() {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { unlinkSync(PRUNE_DB + suffix); } catch {}
+  }
+}
+
+describe('pruneOriginals', () => {
+  afterEach(cleanupPrune);
+
+  it('deletes originals older than the TTL and keeps recent ones', () => {
+    delete process.env.WAYFARER_ORIGINALS_TTL_DAYS; // default 14 days
+    const db = getDb(PRUNE_DB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s1', '/p', now]);
+    // two observations (FK targets for observation_originals)
+    const oldObs = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s1', '/p', 'Bash', 'in', 'out', null, now - 40 * 86400],
+    ).lastInsertRowid;
+    const newObs = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s1', '/p', 'Bash', 'in', 'out', null, now],
+    ).lastInsertRowid;
+    db.run(
+      'INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at) VALUES (?,?,?,?)',
+      [oldObs, null, 'old full output', now - 40 * 86400],
+    );
+    db.run(
+      'INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at) VALUES (?,?,?,?)',
+      [newObs, null, 'new full output', now],
+    );
+
+    const deleted = pruneOriginals(db, now);
+    expect(deleted).toBe(1);
+
+    const remaining = db.query('SELECT observation_id FROM observation_originals').all() as Array<{ observation_id: number }>;
+    expect(remaining).toHaveLength(1);
+    expect(Number(remaining[0].observation_id)).toBe(Number(newObs));
+    db.close();
   });
 });

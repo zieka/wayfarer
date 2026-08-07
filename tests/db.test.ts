@@ -72,12 +72,21 @@ describe('getDb', () => {
     db.close();
   });
 
+  it('creates observation_originals table', () => {
+    const db = getDb(TEST_DB);
+    const tables = db.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='observation_originals'"
+    ).get() as { name: string } | null;
+    expect(tables?.name).toBe('observation_originals');
+    db.close();
+  });
+
   it('runs migrations idempotently', () => {
     const db1 = getDb(TEST_DB);
     db1.close();
     const db2 = getDb(TEST_DB);
     const version = db2.query("PRAGMA user_version").get() as { user_version: number };
-    expect(version.user_version).toBe(3);
+    expect(version.user_version).toBe(4);
     db2.close();
   });
 });

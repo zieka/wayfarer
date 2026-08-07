@@ -1,3 +1,5 @@
+import type { Database } from 'bun:sqlite';
+
 const DEFAULT_COMPRESS_THRESHOLD = 2048;
 const DEFAULT_ORIGINALS_TTL_DAYS = 14;
 
@@ -112,4 +114,10 @@ export function compressForStorage(
     input: compressField(toolName, toolInput),
     output: compressField(toolName, toolOutput),
   };
+}
+
+export function pruneOriginals(db: Database, nowSeconds: number): number {
+  const cutoff = nowSeconds - getOriginalsTtlDays() * 86400;
+  const result = db.run('DELETE FROM observation_originals WHERE created_at < ?', [cutoff]);
+  return result.changes;
 }
