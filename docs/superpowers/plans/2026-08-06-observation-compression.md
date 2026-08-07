@@ -363,4 +363,146 @@ git commit -m "feat: log strategy, field compressor, and storage dispatcher"
 
 ---
 
+### Task 3: v4 migration + `pruneOriginals`
+
+**Files:**
+- Modify: `src/db.ts` (add the v4 migration block)
+- Modify: `tests/db.test.ts` (new-table test; bump `user_version` assertion 3 → 4)
+- Modify: `src/compress.ts` (add `pruneOriginals`)
+- Test: `tests/compress.test.ts` (prune test)
+
+**Interfaces:**
+- Consumes: `getDb` (`src/db.ts`), `getOriginalsTtlDays` (Task 1).
+- Produces: `pruneOriginals(db: Database, nowSeconds: number): number` (returns rows deleted).
+- Note: `import type { Database } from 'bun:sqlite'` in `compress.ts` for the param type.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/db.test.ts — ADD this test inside describe('getDb', ...)
+  it('creates observation_originals table', () => {
+    const db = getDb(TEST_DB);
+    const tables = db.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='observation_originals'"
+    ).get() as { name: string } | null;
+    expect(tables?.name).toBe('observation_originals');
+    db.close();
+  });
+```
+
+```ts
+// tests/db.test.ts — CHANGE the existing 'runs migrations idempotently' expectation
+// from:  expect(version.user_version).toBe(3);
+//   to:  expect(version.user_version).toBe(4);
+```
+
+```ts
+// tests/compress.test.ts — append
+import { unlinkSync } from 'fs';
+import { getDb } from '../src/db';
+import { pruneOriginals } from '../src/compress';
+
+const PRUNE_DB = '/tmp/wayfarer-test-prune.db';
+
+function cleanupPrune() {
+  for (const suffix of ['', '-wal', '-shm']) {
+    try { unlinkSync(PRUNE_DB + suffix); } catch {}
+  }
+}
+
+describe('pruneOriginals', () => {
+  afterEach(cleanupPrune);
+
+  it('deletes originals older than the TTL and keeps recent ones', () => {
+    delete process.env.WAYFARER_ORIGINALS_TTL_DAYS; // default 14 days
+    const db = getDb(PRUNE_DB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s1', '/p', now]);
+    // two observations (FK targets for observation_originals)
+    const oldObs = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s1', '/p', 'Bash', 'in', 'out', null, now - 40 * 86400],
+    ).lastInsertRowid;
+    const newObs = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s1', '/p', 'Bash', 'in', 'out', null, now],
+    ).lastInsertRowid;
+    db.run(
+      'INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at) VALUES (?,?,?,?)',
+      [oldObs, null, 'old full output', now - 40 * 86400],
+    );
+    db.run(
+      'INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at) VALUES (?,?,?,?)',
+      [newObs, null, 'new full output', now],
+    );
+
+    const deleted = pruneOriginals(db, now);
+    expect(deleted).toBe(1);
+
+    const remaining = db.query('SELECT observation_id FROM observation_originals').all() as Array<{ observation_id: number }>;
+    expect(remaining).toHaveLength(1);
+    expect(Number(remaining[0].observation_id)).toBe(Number(newObs));
+    db.close();
+  });
+});
+```
+
+`afterEach` is already imported in `tests/compress.test.ts` — if not, add it to the existing `bun:test` import.
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/db.test.ts tests/compress.test.ts`
+Expected: FAIL — `observation_originals` table missing (migration not written), `user_version` still 3, `pruneOriginals` not exported.
+
+- [ ] **Step 3: Write the migration**
+
+```ts
+// src/db.ts — add after the `if (version < 3) { ... }` block, before the closing brace of migrate()
+  if (version < 4) {
+    db.run('BEGIN');
+    db.run(`
+      CREATE TABLE IF NOT EXISTS observation_originals (
+        observation_id INTEGER PRIMARY KEY,
+        tool_input_full TEXT,
+        tool_output_full TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+      )
+    `);
+    db.run('CREATE INDEX IF NOT EXISTS idx_originals_created ON observation_originals(created_at)');
+    db.run('PRAGMA user_version = 4');
+    db.run('COMMIT');
+  }
+```
+
+- [ ] **Step 4: Write `pruneOriginals`**
+
+```ts
+// src/compress.ts — add at the top with the other imports
+import type { Database } from 'bun:sqlite';
+
+// src/compress.ts — append
+export function pruneOriginals(db: Database, nowSeconds: number): number {
+  const cutoff = nowSeconds - getOriginalsTtlDays() * 86400;
+  const result = db.run('DELETE FROM observation_originals WHERE created_at < ?', [cutoff]);
+  return result.changes;
+}
+```
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+Run: `bun test tests/db.test.ts tests/compress.test.ts`
+Expected: PASS (new table test, `user_version === 4`, prune test, and all Task 1–2 cases).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/db.ts tests/db.test.ts src/compress.ts tests/compress.test.ts
+git commit -m "feat: observation_originals table (v4) and TTL prune"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
