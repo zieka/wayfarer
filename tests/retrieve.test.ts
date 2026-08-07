@@ -94,7 +94,7 @@ describe('formatSummaryContext', () => {
 describe('formatObservationContext', () => {
   it('renders the markdown table', () => {
     const rows: ObsRow[] = [
-      { tool_name: 'Edit', files_touched: 'src/auth.ts', created_at: NOW - 3600, context: 'edited auth' },
+      { id: 1, tool_name: 'Edit', files_touched: 'src/auth.ts', created_at: NOW - 3600, context: 'edited auth' },
     ];
     const out = formatObservationContext(rows);
     expect(out).toContain('| Time | Tool | Files | Context |');

@@ -24,5 +24,6 @@ bun "$CLAUDE_PLUGIN_ROOT/scripts/retrieve.js" <observationId>
 
 - `## Observation #<id> — <tool> @ <time>`, then `### Input` / `### Output` with the full original content.
 - `(original expired — showing compressed form)` on a field: the original passed its retention window; only the compressed form remains.
+  - Heuristic: this flag fires on detecting a `[wayfarer: …]` marker in the stored text, so a never-compressed observation whose own content happens to contain such a marker can false-positive — the full content is still shown either way.
 - `no observation with id <id>`: no such observation exists.
 - `error retrieving observation <id>: <message>`: retrieval failed (e.g. the database is unreadable). This is distinct from "does not exist" — the observation may well exist.

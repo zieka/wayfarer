@@ -73,11 +73,10 @@ export function runRetrieve(
     db = openDb(args[1]);
     return formatRetrieveResult(retrieve(db, id));
   } catch (e) {
-    // Real failure (DB unreadable, corrupt row): distinct from not-found so a broken
-    // DB never silently reads to the model as "that observation does not exist".
+    // Distinct wording from not-found, so a broken DB doesn't read to the model as "does not exist".
     return `wayfarer-retrieve: error retrieving observation ${id}: ${e instanceof Error ? e.message : String(e)}\n`;
   } finally {
-    db?.close();
+    try { db?.close(); } catch {}
   }
 }
 
