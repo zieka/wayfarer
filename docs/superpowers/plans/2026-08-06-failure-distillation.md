@@ -702,4 +702,194 @@ git commit -m "feat: distill corrections in the worker, decoupled from summary a
 
 ---
 
+### Task 6: Pitfalls injection + final gate
+
+**Files:**
+- Modify: `src/retrieve.ts`
+- Test: `tests/retrieve.test.ts`
+
+**Interfaces:**
+- Consumes: `getDb`, `getBudget`, `fitToBudget`, `estimateTokens`, `formatSummaryContext`, `budgetSummaries`, `formatObservationContext`, `obsLine`, `CANDIDATE_CAP`, `SummaryItem`, `ObsRow` (all existing in `retrieve.ts`); the `corrections` table (Task 2).
+- Produces: `PITFALLS_BUDGET = 400`, `PITFALLS_CAP = 5`, `interface Correction { correction: string; created_at: number }`, `pitfallsForProject(db, project): Correction[]`, `formatPitfallsContext(items): string`; and an updated `primerForSession(project, dbPath?, opts?: { pitfalls?: (db, project) => Correction[] })` that prepends a tight-capped pitfalls block above the existing summary/observation block.
+- The injectable `opts.pitfalls` (defaulting to `pitfallsForProject`) exists so the failure-path degrade is deterministically testable.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/retrieve.test.ts — append at END. Do NOT re-import describe/it/expect/afterEach,
+// unlinkSync, getDb, or primerForSession — they are already imported at the top of this file.
+
+const PDB = '/tmp/wayfarer-test-pitfalls.db';
+function cleanupPDB() { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(PDB + s); } catch {} } }
+function seedSummary(db: ReturnType<typeof getDb>, project: string, text: string, t: number) {
+  db.run('INSERT OR IGNORE INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s', project, 'x', t]);
+  db.run('INSERT INTO session_summaries (session_id, project, summary, files_read, files_edited, created_at) VALUES (?,?,?,?,?,?)', ['s', project, text, null, null, t]);
+}
+function seedCorrection(db: ReturnType<typeof getDb>, project: string, text: string, hash: string, t: number) {
+  db.run('INSERT INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', [project, text, hash, 's', t]);
+}
+
+describe('primerForSession — pitfalls injection', () => {
+  afterEach(cleanupPDB);
+
+  it('prepends a Known pitfalls section ABOVE summaries', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedSummary(db, '/p', 'Did a thing.', now);
+    seedCorrection(db, '/p', 'Run npm ci before npm test.', 'h1', now);
+    db.close();
+    const out = primerForSession('/p', PDB);
+    expect(out).toContain('## Known pitfalls in this project');
+    expect(out).toContain('Run npm ci before npm test.');
+    expect(out).toContain('Did a thing.');
+    expect(out!.indexOf('Known pitfalls')).toBeLessThan(out!.indexOf('Did a thing.'));
+  });
+
+  it('adds no pitfalls section when there are no corrections (summary path unchanged)', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedSummary(db, '/p', 'Did a thing.', now);
+    db.close();
+    const out = primerForSession('/p', PDB);
+    expect(out).not.toContain('Known pitfalls');
+    expect(out).toContain('Did a thing.');
+  });
+
+  it('returns just the pitfalls section when corrections exist but no summaries/observations', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedCorrection(db, '/only', 'Avoid X.', 'h1', now);
+    db.close();
+    const out = primerForSession('/only', PDB);
+    expect(out).toContain('## Known pitfalls in this project');
+    expect(out).toContain('Avoid X.');
+  });
+
+  it('degrades to no pitfalls section (and never throws) when the pitfalls query fails', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedSummary(db, '/p', 'Did a thing.', now);
+    db.close();
+    let out: string | null = null;
+    expect(() => { out = primerForSession('/p', PDB, { pitfalls: () => { throw new Error('boom'); } }); }).not.toThrow();
+    expect(out).toContain('Did a thing.');
+    expect(out).not.toContain('Known pitfalls');
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/retrieve.test.ts`
+Expected: FAIL — no pitfalls section / `primerForSession` has no `opts` param yet.
+
+- [ ] **Step 3: Add the pitfalls helpers**
+
+In `src/retrieve.ts`, near the other format helpers, add:
+```ts
+export const PITFALLS_BUDGET = 400;
+export const PITFALLS_CAP = 5;
+
+export interface Correction {
+  correction: string;
+  created_at: number;
+}
+
+export function pitfallsForProject(db: ReturnType<typeof getDb>, project: string): Correction[] {
+  return db.query(
+    'SELECT correction, created_at FROM corrections WHERE project = ? ORDER BY created_at DESC LIMIT ?',
+  ).all(project, PITFALLS_CAP) as Correction[];
+}
+
+function pitfallLine(c: Correction): string {
+  return `- ${c.correction}`;
+}
+
+export function formatPitfallsContext(items: Correction[]): string {
+  const body = items.map(pitfallLine).join('\n');
+  return `<wayfarer-context>\n## Known pitfalls in this project\n\n${body}\n</wayfarer-context>`;
+}
+```
+
+- [ ] **Step 4: Replace `primerForSession` with the pitfalls-aware version**
+
+Replace the whole existing `primerForSession` with:
+```ts
+export function primerForSession(
+  project: string,
+  dbPath?: string,
+  opts: { pitfalls?: (db: ReturnType<typeof getDb>, project: string) => Correction[] } = {},
+): string | null {
+  const db = getDb(dbPath);
+  try {
+    const budget = getBudget();
+
+    // Pitfalls: own tight sub-budget; guarded so a failure never blocks the primer.
+    let pitfallsBlock = '';
+    try {
+      const provider = opts.pitfalls ?? pitfallsForProject;
+      const items = fitToBudget(provider(db, project), PITFALLS_BUDGET, (c) => estimateTokens(pitfallLine(c)));
+      if (items.length > 0) pitfallsBlock = formatPitfallsContext(items);
+    } catch (e) {
+      console.error(`wayfarer: pitfalls injection failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // Main block: summaries → observation fallback → none (unchanged behavior).
+    let mainBlock: string | null = null;
+    const summaries = db.query(`
+      SELECT summary, files_read, files_edited, created_at
+      FROM session_summaries
+      WHERE project = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(project, CANDIDATE_CAP) as SummaryItem[];
+
+    if (summaries.length > 0) {
+      mainBlock = formatSummaryContext(budgetSummaries(summaries, budget), 'Recent work in this project');
+    } else {
+      const rows = db.query(`
+        SELECT id, tool_name, files_touched, created_at, tool_input AS context
+        FROM observations
+        WHERE project = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `).all(project, CANDIDATE_CAP) as ObsRow[];
+      if (rows.length > 0) {
+        mainBlock = formatObservationContext(fitToBudget(rows, budget, (r) => estimateTokens(obsLine(r))));
+      }
+    }
+
+    const blocks = [pitfallsBlock, mainBlock].filter(Boolean) as string[];
+    return blocks.length > 0 ? blocks.join('\n') : null;
+  } finally {
+    db.close();
+  }
+}
+```
+This preserves the existing behavior exactly when there are no corrections (empty `pitfallsBlock` → returns just the summary/observation block, or `null` when nothing exists), and `session-start.ts`'s 2-arg call is unaffected (the `opts` param is optional).
+
+- [ ] **Step 5: Run the retrieve tests**
+
+Run: `bun test tests/retrieve.test.ts`
+Expected: PASS — the four new pitfalls tests AND the pre-existing `primerForSession`/`relevantForPrompt` tests (unchanged behavior when no corrections).
+
+- [ ] **Step 6: Final gate (type-check + build + full suite)**
+
+Run: `bun run typecheck` — exits 0.
+Run: `bun test` — `N pass, 0 fail` (ignore the trailing Bun panic/exit-133).
+Run: `bun run build` — type-check gate passes then `Built 4 hooks + summarize-worker + retrieve to plugin/scripts/`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/retrieve.ts tests/retrieve.test.ts
+git commit -m "feat: inject a Known-pitfalls section at SessionStart"
+```
+
+---
+
+## Self-Review
+
+(Appended in the next step.)
+
 <!-- Task detail appended incrementally, one task per commit. -->
