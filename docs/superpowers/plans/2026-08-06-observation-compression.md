@@ -772,20 +772,23 @@ git commit -m "feat: compress observations at capture, preserve originals"
 import { pruneOriginals } from './compress';
 ```
 
-- [ ] **Step 2: Call prune before closing the DB**
+- [ ] **Step 2: Prune right after opening the DB (decoupled from summarization)**
 
-In `src/summarize-worker.ts`, the main `try` block ends with `db.close();` (currently the last statement before the outer `catch`). Insert the prune call immediately before that `db.close();`:
+In `src/summarize-worker.ts`, place the prune call immediately AFTER `const db = getDb(dbPath);` and BEFORE the `if (!session)` / `if (observations.length === 0)` early-exit checks. Pruning must NOT depend on summarization succeeding: the early exits and any `claude -p` failure would otherwise bypass it (via the outer `catch` → `process.exit(0)`), letting the originals table grow unbounded under a persistent summarizer failure. Running it first — before the session/observations checks and before the `claude -p` await — guarantees TTL cleanup on every path that obtains a DB handle. It stays in its own try/catch so a prune failure never affects the summary write.
 
 ```ts
-  // TTL-prune expired observation originals. Non-fatal — never affects the summary write.
+  const db = getDb(dbPath);
+
+  // TTL-prune expired observation originals FIRST, so cleanup runs regardless of
+  // whether summarization succeeds (early exits and claude -p failures skip the rest).
   try {
     pruneOriginals(db, Math.floor(Date.now() / 1000));
   } catch (e) {
     console.error(`wayfarer: prune failed: ${e instanceof Error ? e.message : String(e)}`);
   }
-
-  db.close();
 ```
+
+Do not add a second prune call before `db.close()`.
 
 - [ ] **Step 3: Run the full suite**
 
