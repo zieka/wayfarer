@@ -422,4 +422,126 @@ git commit -m "feat: retrieveOriginal three-state resolution and result formatti
 
 ---
 
+### Task 3: `runRetrieve` CLI core + entry
+
+**Files:**
+- Modify: `src/retrieve-original.ts` (append the CLI core + `import.meta.main` entry + `getDb` import)
+- Test: `tests/retrieve-original.test.ts` (append CLI tests)
+
+**Interfaces:**
+- Consumes: `retrieveOriginal`, `formatRetrieveResult` (Task 2); `getDb` (`src/db.ts`); `Database` type (already imported).
+- Produces: `runRetrieve(args: string[], deps?: { openDb?: (dbPath?: string) => Database; retrieve?: typeof retrieveOriginal }): string`
+- Behavior: the CLI always returns a string and (via the entry) exits 0. It must distinguish **not found** (`no observation with id <N>`, from `retrieveOriginal`/`formatRetrieveResult`) from **real failure** (`error retrieving observation <N>: <message>`, from the catch). `openDb`/`retrieve` are injectable so the thrown-error path is testable.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/retrieve-original.test.ts — append; merge `runRetrieve` into the existing `../src/retrieve-original` import.
+import { runRetrieve } from '../src/retrieve-original';
+
+describe('runRetrieve (CLI core)', () => {
+  beforeEach(cleanup);
+  afterEach(cleanup);
+
+  it('formats a found observation for a valid id', () => {
+    const db = getDb(DB);
+    const id = seedObservation(db, { toolInput: 'echo hi', toolOutput: 'hi there' });
+    db.close();
+    const out = runRetrieve([String(id), DB]);
+    expect(out).toContain(`Observation #${id}`);
+    expect(out).toContain('hi there');
+  });
+
+  it('returns a usage message for a missing or non-numeric id', () => {
+    expect(runRetrieve([])).toContain('positive integer observation id');
+    expect(runRetrieve(['abc'])).toContain('positive integer observation id');
+    expect(runRetrieve(['0'])).toContain('positive integer observation id');
+    expect(runRetrieve(['-3'])).toContain('positive integer observation id');
+  });
+
+  it('returns not-found wording for an unknown id (real DB)', () => {
+    const db = getDb(DB); db.close(); // materialize the schema
+    const out = runRetrieve(['4242', DB]);
+    expect(out).toContain('no observation with id 4242');
+  });
+
+  it('a thrown DB error produces the ERROR wording, NOT the not-found wording', () => {
+    const boom = ((_p?: string) => { throw new Error('database disk image is malformed'); });
+    const out = runRetrieve(['5'], { openDb: boom });
+    expect(out).toContain('error retrieving observation 5');
+    expect(out).toContain('database disk image is malformed');
+    expect(out).not.toContain('no observation with id'); // a broken DB must NOT read as not-found
+  });
+
+  it('a corrupt-row error (retrieve throws) also produces the error wording, not not-found', () => {
+    const throwingRetrieve = ((_db: unknown, _id: number) => { throw new Error('corrupt row'); }) as typeof retrieveOriginal;
+    const out = runRetrieve(['6', DB], { retrieve: throwingRetrieve });
+    expect(out).toContain('error retrieving observation 6');
+    expect(out).not.toContain('no observation with id');
+  });
+});
+```
+
+(The corrupt-row test imports `retrieveOriginal` for its type — it is already imported in this file from Task 2.)
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/retrieve-original.test.ts`
+Expected: FAIL — `runRetrieve` not exported.
+
+- [ ] **Step 3: Write the implementation**
+
+Add the `getDb` import near the top of `src/retrieve-original.ts`:
+
+```ts
+import { getDb } from './db';
+```
+
+Append the CLI core and entry:
+
+```ts
+export function runRetrieve(
+  args: string[],
+  deps: { openDb?: (dbPath?: string) => Database; retrieve?: typeof retrieveOriginal } = {},
+): string {
+  const idArg = args[0];
+  const id = Number(idArg);
+  if (!idArg || !Number.isInteger(id) || id <= 0) {
+    return 'wayfarer-retrieve: provide a positive integer observation id\n';
+  }
+  const openDb = deps.openDb ?? getDb;
+  const retrieve = deps.retrieve ?? retrieveOriginal;
+  let db: Database | undefined;
+  try {
+    db = openDb(args[1]);
+    return formatRetrieveResult(retrieve(db, id));
+  } catch (e) {
+    // Real failure (DB unreadable, corrupt row): distinct from not-found so a broken
+    // DB never silently reads to the model as "that observation does not exist".
+    return `wayfarer-retrieve: error retrieving observation ${id}: ${e instanceof Error ? e.message : String(e)}\n`;
+  } finally {
+    db?.close();
+  }
+}
+
+if (import.meta.main) {
+  process.stdout.write(runRetrieve(process.argv.slice(2)));
+  process.exit(0);
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `bun test tests/retrieve-original.test.ts`
+Expected: PASS — including the thrown-DB-error test asserting the error wording AND `not.toContain('no observation with id')`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/retrieve-original.ts tests/retrieve-original.test.ts
+git commit -m "feat: runRetrieve CLI core distinguishing real errors from not-found"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
