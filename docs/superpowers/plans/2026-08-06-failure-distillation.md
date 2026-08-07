@@ -239,4 +239,121 @@ git commit -m "feat: schema v5 — observations.is_error and corrections table"
 
 ---
 
+### Task 3: Capture `is_error` at PostToolUse
+
+**Files:**
+- Modify: `src/hooks/post-tool-use.ts`
+- Test: `tests/hooks/post-tool-use.test.ts`
+
+**Interfaces:**
+- Consumes: the `observations.is_error` column (Task 2).
+- Produces: a private `detectIsError(input, toolOutput): number` and an `is_error` value written on every observation. No new exports.
+- Behavior: prefer the payload flag (`tool_response.is_error` when `tool_response` is an object), else a conservative output-text heuristic, else `0`; must never throw.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/hooks/post-tool-use.test.ts — append inside describe('handlePostToolUse', ...)
+  it('stores is_error=1 when the payload signals an error (tool_response.is_error)', () => {
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: JSON.stringify({ command: 'ls /nope' }),
+      tool_response: { is_error: true, output: 'ls: /nope: not found' },
+    }, TEST_DB);
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT is_error FROM observations WHERE session_id = ? ORDER BY id DESC').get('sess-1') as { is_error: number };
+    expect(obs.is_error).toBe(1);
+    db.close();
+  });
+
+  it('stores is_error=1 via the output heuristic when there is no payload flag', () => {
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: JSON.stringify({ command: 'cat missing.txt' }),
+      tool_response: 'cat: missing.txt: No such file or directory',
+    }, TEST_DB);
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT is_error FROM observations WHERE session_id = ? ORDER BY id DESC').get('sess-1') as { is_error: number };
+    expect(obs.is_error).toBe(1);
+    db.close();
+  });
+
+  it('stores is_error=0 for a normal success', () => {
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Edit',
+      tool_input: JSON.stringify({ file_path: '/tmp/project/src/a.ts' }),
+      tool_response: 'File edited successfully',
+    }, TEST_DB);
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT is_error FROM observations WHERE session_id = ? ORDER BY id DESC').get('sess-1') as { is_error: number };
+    expect(obs.is_error).toBe(0);
+    db.close();
+  });
+
+  it('never throws while detecting is_error (odd payload)', () => {
+    expect(() => handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: 'x', tool_response: { is_error: { nested: 'weird' } },
+    }, TEST_DB)).not.toThrow();
+  });
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/hooks/post-tool-use.test.ts`
+Expected: FAIL — `is_error` is not captured yet (column exists from Task 2 but the INSERT doesn't set it, so it defaults to 0 and the two `is_error=1` tests fail).
+
+- [ ] **Step 3: Write the implementation**
+
+Add near the top of `src/hooks/post-tool-use.ts` (after the imports):
+```ts
+// Conservative fallback when the payload carries no explicit error flag.
+const ERROR_TEXT_RE = /\b(error|exception|failed|failure|traceback|panic|not found|no such file|permission denied|command not found)\b/i;
+
+function detectIsError(input: Record<string, unknown>, toolOutput: string): number {
+  try {
+    const resp = input.tool_response;
+    if (resp && typeof resp === 'object' && 'is_error' in resp) {
+      return (resp as { is_error?: unknown }).is_error ? 1 : 0;
+    }
+    return ERROR_TEXT_RE.test(toolOutput) ? 1 : 0;
+  } catch {
+    return 0; // detection must never block capture
+  }
+}
+```
+
+Compute it from the RAW `toolOutput` (before compression) — add after the `toolOutput` assignment (around line 21):
+```ts
+  const isError = detectIsError(input, toolOutput);
+```
+
+Add `is_error` to the observations INSERT:
+```ts
+    const res = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, is_error, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [sessionId, project, toolName, storedInput, storedOutput, filesTouched, isError, now],
+    );
+```
+
+Leave the compression/originals logic and the `{ continue: true }` return unchanged.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `bun test tests/hooks/post-tool-use.test.ts`
+Expected: PASS — payload-flag → 1, heuristic → 1, success → 0, odd-payload never throws; and the pre-existing post-tool-use tests still pass (their benign outputs detect as `is_error=0`, which none of them assert against).
+
+- [ ] **Step 5: Type-check + commit**
+
+Run: `bun run typecheck`
+Expected: exits 0.
+
+```bash
+git add src/hooks/post-tool-use.ts tests/hooks/post-tool-use.test.ts
+git commit -m "feat: capture is_error on each observation at PostToolUse"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
