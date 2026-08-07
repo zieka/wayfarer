@@ -505,4 +505,210 @@ git commit -m "feat: observation_originals table (v4) and TTL prune"
 
 ---
 
+### Task 4: Wire capture in `post-tool-use.ts`
+
+**Files:**
+- Modify: `src/hooks/post-tool-use.ts`
+- Test: `tests/hooks/post-tool-use.test.ts`
+
+**Interfaces:**
+- Consumes: `compressForStorage`, `hardTruncate` (`src/compress.ts`); `extractFilePaths` (`src/files.ts`); `getDb`.
+- Produces: `handlePostToolUse(input, dbPath?, deps?: { compress?: typeof compressForStorage }): HookResponse` (adds an optional injectable `compress` dep; return shape unchanged).
+
+**Behavior:** extract file paths from the ORIGINAL `tool_input` first; compute stored values via `compress` inside a try/catch (on throw → `hardTruncate` both fields, save no originals); ALWAYS insert the observation; if either field was compressed, insert one `observation_originals` row keyed by `lastInsertRowid`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/hooks/post-tool-use.test.ts — append these tests inside describe('handlePostToolUse', ...)
+
+  it('stores compressed output and preserves the original for a large output', () => {
+    const bigOutput = Array.from({ length: 400 }, (_, i) => `output row ${i}`).join('\n');
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: 'run build', tool_response: bigOutput,
+    }, TEST_DB);
+
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT id, tool_output FROM observations WHERE session_id = ? ORDER BY id DESC')
+      .get('sess-1') as { id: number; tool_output: string };
+    expect(obs.tool_output.length).toBeLessThan(bigOutput.length);
+    const orig = db.query('SELECT tool_output_full FROM observation_originals WHERE observation_id = ?')
+      .get(obs.id) as { tool_output_full: string } | null;
+    expect(orig?.tool_output_full).toBe(bigOutput);
+    db.close();
+  });
+
+  it('stores small output verbatim with no originals row', () => {
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: 'echo hi', tool_response: 'hi',
+    }, TEST_DB);
+
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT id, tool_output FROM observations WHERE session_id = ? ORDER BY id DESC')
+      .get('sess-1') as { id: number; tool_output: string };
+    expect(obs.tool_output).toBe('hi');
+    const orig = db.query('SELECT observation_id FROM observation_originals WHERE observation_id = ?')
+      .get(obs.id) as unknown;
+    expect(orig).toBeNull();
+    db.close();
+  });
+
+  // Constraint 1: file-path extraction runs on the ORIGINAL input, before compression.
+  it('extracts files_touched from a path in the compressed-away middle of a large input', () => {
+    const head = Array.from({ length: 60 }, (_, i) => `prefix line ${i}`);
+    const buried = 'see /tmp/project/src/deep/buried.ts for details';
+    const tail = Array.from({ length: 60 }, (_, i) => `suffix line ${i}`);
+    const bigInput = [...head, buried, ...tail].join('\n'); // > 2KB, path is mid-document
+
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Read',
+      tool_input: bigInput, tool_response: 'ok',
+    }, TEST_DB);
+
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT tool_input, files_touched FROM observations WHERE session_id = ? ORDER BY id DESC')
+      .get('sess-1') as { tool_input: string; files_touched: string | null };
+    // files_touched came from the ORIGINAL (extraction before compression)
+    expect(obs.files_touched).toContain('src/deep/buried.ts');
+    // and the stored input was compressed, dropping the buried path from the row
+    expect(obs.tool_input.length).toBeLessThan(bigInput.length);
+    expect(obs.tool_input).not.toContain('buried.ts');
+    db.close();
+  });
+
+  // Constraint 2: a throwing compressor must not block capture or throw.
+  it('still inserts the observation and returns normally when compression throws', () => {
+    const throwingCompress = () => { throw new Error('boom'); };
+    let result: unknown;
+    expect(() => {
+      result = handlePostToolUse({
+        session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+        tool_input: 'x'.repeat(5000), tool_response: 'y'.repeat(5000),
+      }, TEST_DB, { compress: throwingCompress as any });
+    }).not.toThrow();
+    expect(result).toEqual({ continue: true });
+
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT id FROM observations WHERE session_id = ? ORDER BY id DESC')
+      .get('sess-1') as { id: number } | null;
+    expect(obs).not.toBeNull();
+    // failure path saves no originals
+    const orig = db.query('SELECT observation_id FROM observation_originals WHERE observation_id = ?')
+      .get(obs!.id) as unknown;
+    expect(orig).toBeNull();
+    db.close();
+  });
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/hooks/post-tool-use.test.ts`
+Expected: FAIL — no compression yet (large output stored verbatim, no `observation_originals` rows, `deps` arg unsupported).
+
+- [ ] **Step 3: Write the implementation**
+
+```ts
+// src/hooks/post-tool-use.ts
+import { readStdin } from '../stdin';
+import { getDb } from '../db';
+import { extractFilePaths } from '../files';
+import { compressForStorage, hardTruncate } from '../compress';
+import type { HookResponse } from './user-prompt-submit';
+
+export function handlePostToolUse(
+  input: Record<string, unknown>,
+  dbPath?: string,
+  deps: { compress?: typeof compressForStorage } = {},
+): HookResponse {
+  const compress = deps.compress ?? compressForStorage;
+  const sessionId = (input.session_id ?? input.id ?? input.sessionId) as string;
+  const project = (input.cwd ?? process.cwd()) as string;
+  const toolName = (input.tool_name ?? 'unknown') as string;
+  const toolInput = typeof input.tool_input === 'string'
+    ? input.tool_input
+    : JSON.stringify(input.tool_input ?? '');
+  const toolOutput = typeof input.tool_response === 'string'
+    ? input.tool_response
+    : JSON.stringify(input.tool_response ?? '');
+
+  // Constraint 1: extract file paths from the ORIGINAL input, before compression.
+  const filesTouched = extractFilePaths(toolInput);
+
+  // Constraint 2: compression must never block capture.
+  let storedInput = toolInput;
+  let storedOutput = toolOutput;
+  let originalInput: string | null = null;
+  let originalOutput: string | null = null;
+  try {
+    const { input: ci, output: co } = compress(toolName, toolInput, toolOutput);
+    storedInput = ci.text;
+    storedOutput = co.text;
+    originalInput = ci.compressed ? toolInput : null;
+    originalOutput = co.compressed ? toolOutput : null;
+  } catch (e) {
+    storedInput = hardTruncate(toolInput);
+    storedOutput = hardTruncate(toolOutput);
+    originalInput = null;
+    originalOutput = null;
+    console.error(`wayfarer: compression failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const db = getDb(dbPath);
+  try {
+    db.run(
+      'INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?, ?, ?)',
+      [sessionId, project, now],
+    );
+
+    const res = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [sessionId, project, toolName, storedInput, storedOutput, filesTouched, now],
+    );
+
+    if (originalInput !== null || originalOutput !== null) {
+      db.run(
+        `INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at)
+         VALUES (?, ?, ?, ?)`,
+        [res.lastInsertRowid, originalInput, originalOutput, now],
+      );
+    }
+  } finally {
+    db.close();
+  }
+
+  return { continue: true };
+}
+
+if (import.meta.main) {
+  try {
+    const input = await readStdin();
+    if (input) {
+      const result = handlePostToolUse(input);
+      process.stdout.write(JSON.stringify(result));
+    }
+  } catch (e) {
+    console.error(`wayfarer: post-tool-use failed: ${(e as Error).message}`);
+  }
+  process.exit(0);
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `bun test tests/hooks/post-tool-use.test.ts`
+Expected: PASS (the four new tests plus the pre-existing ones — small outputs still store verbatim).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/hooks/post-tool-use.ts tests/hooks/post-tool-use.test.ts
+git commit -m "feat: compress observations at capture, preserve originals"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
