@@ -211,11 +211,50 @@ export async function relevantForPrompt(
   }
 }
 
-export function primerForSession(project: string, dbPath?: string): string | null {
+export const PITFALLS_BUDGET = 400;
+export const PITFALLS_CAP = 5;
+
+export interface Correction {
+  correction: string;
+  created_at: number;
+}
+
+export function pitfallsForProject(db: ReturnType<typeof getDb>, project: string): Correction[] {
+  return db.query(
+    'SELECT correction, created_at FROM corrections WHERE project = ? ORDER BY created_at DESC LIMIT ?',
+  ).all(project, PITFALLS_CAP) as Correction[];
+}
+
+function pitfallLine(c: Correction): string {
+  return `- ${c.correction}`;
+}
+
+export function formatPitfallsContext(items: Correction[]): string {
+  const body = items.map(pitfallLine).join('\n');
+  return `<wayfarer-context>\n## Known pitfalls in this project\n\n${body}\n</wayfarer-context>`;
+}
+
+export function primerForSession(
+  project: string,
+  dbPath?: string,
+  opts: { pitfalls?: (db: ReturnType<typeof getDb>, project: string) => Correction[] } = {},
+): string | null {
   const db = getDb(dbPath);
   try {
     const budget = getBudget();
 
+    // Pitfalls: own tight sub-budget; guarded so a failure never blocks the primer.
+    let pitfallsBlock = '';
+    try {
+      const provider = opts.pitfalls ?? pitfallsForProject;
+      const items = fitToBudget(provider(db, project), PITFALLS_BUDGET, (c) => estimateTokens(pitfallLine(c)));
+      if (items.length > 0) pitfallsBlock = formatPitfallsContext(items);
+    } catch (e) {
+      console.error(`wayfarer: pitfalls injection failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // Main block: summaries → observation fallback → none (unchanged behavior).
+    let mainBlock: string | null = null;
     const summaries = db.query(`
       SELECT summary, files_read, files_edited, created_at
       FROM session_summaries
@@ -225,20 +264,22 @@ export function primerForSession(project: string, dbPath?: string): string | nul
     `).all(project, CANDIDATE_CAP) as SummaryItem[];
 
     if (summaries.length > 0) {
-      return formatSummaryContext(budgetSummaries(summaries, budget), 'Recent work in this project');
+      mainBlock = formatSummaryContext(budgetSummaries(summaries, budget), 'Recent work in this project');
+    } else {
+      const rows = db.query(`
+        SELECT id, tool_name, files_touched, created_at, tool_input AS context
+        FROM observations
+        WHERE project = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+      `).all(project, CANDIDATE_CAP) as ObsRow[];
+      if (rows.length > 0) {
+        mainBlock = formatObservationContext(fitToBudget(rows, budget, (r) => estimateTokens(obsLine(r))));
+      }
     }
 
-    const rows = db.query(`
-      SELECT id, tool_name, files_touched, created_at, tool_input AS context
-      FROM observations
-      WHERE project = ?
-      ORDER BY created_at DESC
-      LIMIT ?
-    `).all(project, CANDIDATE_CAP) as ObsRow[];
-
-    if (rows.length === 0) return null;
-    const fit = fitToBudget(rows, budget, (r) => estimateTokens(obsLine(r)));
-    return formatObservationContext(fit);
+    const blocks = [pitfallsBlock, mainBlock].filter(Boolean) as string[];
+    return blocks.length > 0 ? blocks.join('\n') : null;
   } finally {
     db.close();
   }
