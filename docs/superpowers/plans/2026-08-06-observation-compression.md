@@ -243,6 +243,10 @@ describe('pickStrategy', () => {
   it('routes plain prose to the generic strategy', () => {
     expect(pickStrategy('Read', 'just some ordinary file contents here')).toBe('generic');
   });
+  it('routes keyword-free stack-frame text to the log strategy', () => {
+    const trace = 'line one\n    at foo (bar.ts:1)\n    at baz (bar.ts:2)\nline four';
+    expect(pickStrategy('Read', trace)).toBe('log');
+  });
 });
 
 describe('compressLog', () => {
@@ -267,6 +271,15 @@ describe('compressLog', () => {
     expect(out).toContain('Traceback (most recent call last):');
     expect(out).toContain('    at foo (bar.ts:1)');
     expect(out).toContain('    at baz (bar.ts:2)');
+  });
+  it('preserves the last line even when the compressed result exceeds the cap', () => {
+    // Enough signal volume to push the assembled result past MAX_COMPRESSED_CHARS.
+    const lines = Array.from({ length: 300 }, (_, i) => `ERROR line ${i} ` + 'z'.repeat(40));
+    lines[lines.length - 1] = 'FINAL-TAIL-LINE-MARKER';
+    const out = compressLog(lines.join('\n'));
+    expect(out.length).toBeLessThanOrEqual(MAX_COMPRESSED_CHARS + 80); // cap + marker slack
+    expect(out).toContain('FINAL-TAIL-LINE-MARKER'); // tail survives
+    expect(out).toContain('ERROR line 0');           // head survives
   });
 });
 
@@ -310,11 +323,11 @@ Expected: FAIL — `pickStrategy` / `compressLog` / `compressField` / `compressF
 ```ts
 // append to src/compress.ts
 const LOG_SIGNAL_RE = /\b(ERROR|WARN(?:ING)?|FAIL(?:ED|URE)?|Traceback|Exception|panic)\b/;
-const STACK_FRAME_RE = /^\s+at\s+/;
+const STACK_FRAME_RE = /^\s+at\s+/m; // `m` so it matches a frame on any line of a multi-line blob
 
 export function pickStrategy(toolName: string, text: string): 'log' | 'generic' {
   if (toolName === 'Bash' || toolName === 'BashOutput') return 'log';
-  if (LOG_SIGNAL_RE.test(text)) return 'log';
+  if (LOG_SIGNAL_RE.test(text) || STACK_FRAME_RE.test(text)) return 'log';
   return 'generic';
 }
 
@@ -329,7 +342,7 @@ export function compressLog(text: string): string {
   for (let i = Math.max(0, lines.length - SUMMARY_LINES); i < lines.length; i++) keep[i] = true;
   let signalCount = 0;
   for (let i = 0; i < lines.length && signalCount < MAX_SIGNAL_LINES; i++) {
-    if (isSignal(lines[i])) { keep[i] = true; signalCount++; }
+    if (!keep[i] && isSignal(lines[i])) { keep[i] = true; signalCount++; }
   }
   const out: string[] = [];
   let droppedRun = 0;
@@ -343,7 +356,13 @@ export function compressLog(text: string): string {
   }
   if (droppedRun > 0) out.push(`… [wayfarer: dropped ${droppedRun} lines] …`);
   const result = out.join('\n');
-  return result.length > MAX_COMPRESSED_CHARS ? hardTruncate(result) : result;
+  if (result.length <= MAX_COMPRESSED_CHARS) return result;
+  // Over cap: budget head and tail of the assembled result so BOTH survive.
+  // Never front-slice the whole thing — that drops the guaranteed last SUMMARY_LINES.
+  const sizeMarker = '… [wayfarer: dropped middle for size] …';
+  const budget = Math.max(0, MAX_COMPRESSED_CHARS - sizeMarker.length - 2);
+  const half = Math.floor(budget / 2);
+  return `${result.slice(0, half)}\n${sizeMarker}\n${result.slice(result.length - half)}`;
 }
 
 export function compressField(toolName: string, text: string): { text: string; compressed: boolean } {
