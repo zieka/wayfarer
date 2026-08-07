@@ -34,4 +34,108 @@
 
 ---
 
+### Task 1: Type-check gate
+
+**Files:**
+- Modify: `package.json` (devDeps + `typecheck` script), `tsconfig.json` (include tests/scripts, drop `rootDir`), `scripts/build.ts` (run `tsc --noEmit` first, hard-fail)
+- Possibly add: a minimal ambient declaration file if a dependency lacks types (see Step 4)
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces: a `bun run typecheck` script (`tsc --noEmit`) that every later task runs in its gate, and a `bun run build` that hard-fails on type errors.
+
+This task is infra, not TDD-shaped: the "test" is that `tsc --noEmit` runs clean on the whole tree AND that a deliberately-introduced type error makes `bun run build` exit non-zero without building (Step 6).
+
+- [ ] **Step 1: Add devDependencies**
+
+Run: `bun add -d typescript bun-types`
+Expected: `typescript` and `bun-types` appear under `devDependencies` in `package.json`; `bun.lock` updates.
+
+- [ ] **Step 2: Add the `typecheck` script**
+
+In `package.json` `scripts`, add:
+```json
+    "typecheck": "tsc --noEmit",
+```
+(Keep the existing `build`/`test`/`dev:install` scripts.)
+
+- [ ] **Step 3: Broaden `tsconfig.json` to cover tests + scripts**
+
+The current config only checks `src` and sets `rootDir: "src"` (which conflicts with including other dirs). Since the build uses esbuild — not `tsc` — for output, `rootDir`/`outDir` are irrelevant to `--noEmit`. Change `tsconfig.json` to:
+- Remove the `"rootDir": "src"` line (and the `"outDir": "dist"` line — unused under `--noEmit`).
+- Set `"include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"]`.
+- Keep `"strict": true`, `"types": ["bun-types"]`, `"skipLibCheck": true`, and the rest.
+
+Result `tsconfig.json`:
+```json
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "types": ["bun-types"],
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"],
+  "exclude": ["node_modules", "dist", "plugin"]
+}
+```
+
+- [ ] **Step 4: Run the type check and fix everything it surfaces**
+
+Run: `bun run typecheck`
+Fix every reported error until it exits 0. Likely cases and how to handle them:
+- **A dependency without bundled types** (most likely `fastembed`, imported in `src/embed.ts`) → TS7016 "could not find a declaration file". If `fastembed` genuinely ships no types, add a minimal ambient declaration `src/types/fastembed.d.ts` with just what's used, e.g.:
+  ```ts
+  declare module 'fastembed' {
+    export enum EmbeddingModel { BGESmallENV15 = 'BGESmallENV15' }
+    export class FlagEmbedding {
+      static init(opts: { model: EmbeddingModel; cacheDir?: string }): Promise<FlagEmbedding>;
+      embed(texts: string[]): AsyncIterable<number[][]>;
+    }
+  }
+  ```
+  (Adjust to match the real usage in `src/embed.ts`. If `fastembed` DOES ship types, skip this.)
+- **Real type errors in existing code** (e.g. a missing field on an object literal like the feature-#3 `#undefined` fixture, `possibly-undefined` access, `bigint` vs `number` from `lastInsertRowid`) → fix them properly (add the field, guard the access, `Number(...)` the id). Do NOT silence with `any`/`@ts-ignore` unless it's a genuine third-party gap.
+
+Re-run `bun run typecheck` until it prints no errors and exits 0.
+
+- [ ] **Step 5: Wire the gate into the build (hard-fail)**
+
+At the very top of `scripts/build.ts` (before `mkdirSync`), add:
+```ts
+// Type-check gate: the build is this repo's only automated gate, so hard-fail on any type error.
+const typecheck = Bun.spawnSync(['bunx', 'tsc', '--noEmit'], { stdout: 'inherit', stderr: 'inherit' });
+if (typecheck.exitCode !== 0) {
+  console.error('Type check failed (tsc --noEmit) — aborting build.');
+  process.exit(typecheck.exitCode || 1);
+}
+```
+Leave the rest of `build.ts` unchanged.
+
+- [ ] **Step 6: Verify the gate builds clean AND bites**
+
+Run: `bun run build`
+Expected: type check passes, then `Built 4 hooks + summarize-worker + retrieve to plugin/scripts/`, exit 0.
+
+Then prove the gate fails on a real type error: temporarily add an obviously-wrong line to `src/db.ts` (e.g. `const _x: number = "nope";`), run `bun run build`, and confirm it prints the type-check failure and exits non-zero **without** the "Built …" line. Then remove that line and re-run `bun run build` to confirm it's green again.
+
+- [ ] **Step 7: Full suite + commit**
+
+Run: `bun test`
+Expected: `N pass, 0 fail` (ignore the trailing Bun panic/exit-133 per Global Constraints).
+
+```bash
+git add package.json bun.lock tsconfig.json scripts/build.ts
+# include the ambient declaration if you added one:
+# git add src/types/fastembed.d.ts
+# include any source/test files you fixed to make tsc clean
+git add -A
+git commit -m "build: hard-failing tsc --noEmit type-check gate"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
