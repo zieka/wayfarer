@@ -28,6 +28,15 @@ Focus on what changed and why, not the mechanics of each tool call. Respond with
 
 try {
   const db = getDb(dbPath);
+
+  // TTL-prune expired observation originals FIRST, so cleanup runs regardless of
+  // whether summarization succeeds (early exits and claude -p failures skip the rest).
+  try {
+    pruneOriginals(db, Math.floor(Date.now() / 1000));
+  } catch (e) {
+    console.error(`wayfarer: prune failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
   const session = db.query('SELECT prompt, project FROM sessions WHERE session_id = ?')
     .get(sessionId) as { prompt: string | null; project: string } | null;
 
@@ -92,13 +101,6 @@ try {
   } catch (e) {
     // Embedding failure is non-fatal — FTS5 search still works
     console.error(`wayfarer: embedding failed: ${(e as Error).message}`);
-  }
-
-  // TTL-prune expired observation originals. Non-fatal — never affects the summary write.
-  try {
-    pruneOriginals(db, Math.floor(Date.now() / 1000));
-  } catch (e) {
-    console.error(`wayfarer: prune failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   db.close();
