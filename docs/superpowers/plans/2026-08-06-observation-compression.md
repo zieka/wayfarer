@@ -192,4 +192,175 @@ git commit -m "feat: compression config, hardTruncate, and generic compressor"
 
 ---
 
+### Task 2: `compress.ts` strategies + dispatcher
+
+**Files:**
+- Modify: `src/compress.ts`
+- Test: `tests/compress.test.ts`
+
+**Interfaces:**
+- Consumes: `getCompressThreshold`, `hardTruncate`, `compressGeneric`, and the line-count consts from Task 1.
+- Produces:
+  - `pickStrategy(toolName: string, text: string): 'log' | 'generic'`
+  - `compressLog(text: string): string`
+  - `compressField(toolName: string, text: string): { text: string; compressed: boolean }`
+  - `compressForStorage(toolName: string, toolInput: string, toolOutput: string): { input: { text: string; compressed: boolean }; output: { text: string; compressed: boolean } }`
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// append to tests/compress.test.ts
+import { pickStrategy, compressLog, compressField, compressForStorage } from '../src/compress';
+
+describe('pickStrategy', () => {
+  it('routes Bash to the log strategy', () => {
+    expect(pickStrategy('Bash', 'plain output')).toBe('log');
+  });
+  it('routes text with a log signal to the log strategy', () => {
+    expect(pickStrategy('Read', 'line one\nERROR: boom\nline three')).toBe('log');
+  });
+  it('routes plain prose to the generic strategy', () => {
+    expect(pickStrategy('Read', 'just some ordinary file contents here')).toBe('generic');
+  });
+});
+
+describe('compressLog', () => {
+  it('preserves an error line buried in the middle and drops low-signal lines', () => {
+    const lines = Array.from({ length: 100 }, (_, i) => `info line ${i}`);
+    lines[50] = 'ERROR: something failed';
+    const input = lines.join('\n');
+    const out = compressLog(input);
+    expect(out).toContain('ERROR: something failed');
+    expect(out).toContain('[wayfarer: dropped');
+    expect(out.length).toBeLessThan(input.length);
+    expect(out).toContain('info line 0');   // context head kept
+    expect(out).toContain('info line 99');  // summary tail kept
+    expect(out).not.toContain('info line 40'); // low-signal middle dropped
+  });
+  it('preserves contiguous stack-frame lines', () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `noise ${i}`);
+    lines[40] = 'Traceback (most recent call last):';
+    lines[41] = '    at foo (bar.ts:1)';
+    lines[42] = '    at baz (bar.ts:2)';
+    const out = compressLog(lines.join('\n'));
+    expect(out).toContain('Traceback (most recent call last):');
+    expect(out).toContain('    at foo (bar.ts:1)');
+    expect(out).toContain('    at baz (bar.ts:2)');
+  });
+});
+
+describe('compressField', () => {
+  it('passes through text at or under the threshold unchanged', () => {
+    const r = compressField('Read', 'small');
+    expect(r).toEqual({ text: 'small', compressed: false });
+  });
+  it('compresses a large multi-line field', () => {
+    const input = Array.from({ length: 400 }, (_, i) => `row ${i}`).join('\n');
+    const r = compressField('Read', input);
+    expect(r.compressed).toBe(true);
+    expect(r.text.length).toBeLessThan(input.length);
+  });
+  it('does not inflate: over-threshold but incompressible stays original', () => {
+    // one giant line, length between threshold (2048) and MAX_COMPRESSED_CHARS (4096)
+    const input = 'z'.repeat(3000);
+    const r = compressField('Read', input);
+    expect(r).toEqual({ text: input, compressed: false });
+  });
+});
+
+describe('compressForStorage', () => {
+  it('returns compressed flags for both fields', () => {
+    const bigLog = Array.from({ length: 400 }, (_, i) => `ERROR line ${i}`).join('\n');
+    const r = compressForStorage('Bash', 'small input', bigLog);
+    expect(r.input.compressed).toBe(false);
+    expect(r.output.compressed).toBe(true);
+    expect(r.output.text.length).toBeLessThan(bigLog.length);
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `bun test tests/compress.test.ts`
+Expected: FAIL — `pickStrategy` / `compressLog` / `compressField` / `compressForStorage` not exported.
+
+- [ ] **Step 3: Write minimal implementation**
+
+```ts
+// append to src/compress.ts
+const LOG_SIGNAL_RE = /\b(ERROR|WARN(?:ING)?|FAIL(?:ED|URE)?|Traceback|Exception|panic)\b/;
+const STACK_FRAME_RE = /^\s+at\s+/;
+
+export function pickStrategy(toolName: string, text: string): 'log' | 'generic' {
+  if (toolName === 'Bash' || toolName === 'BashOutput') return 'log';
+  if (LOG_SIGNAL_RE.test(text)) return 'log';
+  return 'generic';
+}
+
+function isSignal(line: string): boolean {
+  return LOG_SIGNAL_RE.test(line) || STACK_FRAME_RE.test(line);
+}
+
+export function compressLog(text: string): string {
+  const lines = text.split('\n');
+  const keep = new Array<boolean>(lines.length).fill(false);
+  for (let i = 0; i < Math.min(CONTEXT_LINES, lines.length); i++) keep[i] = true;
+  for (let i = Math.max(0, lines.length - SUMMARY_LINES); i < lines.length; i++) keep[i] = true;
+  let signalCount = 0;
+  for (let i = 0; i < lines.length && signalCount < MAX_SIGNAL_LINES; i++) {
+    if (isSignal(lines[i])) { keep[i] = true; signalCount++; }
+  }
+  const out: string[] = [];
+  let droppedRun = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (keep[i]) {
+      if (droppedRun > 0) { out.push(`… [wayfarer: dropped ${droppedRun} lines] …`); droppedRun = 0; }
+      out.push(lines[i]);
+    } else {
+      droppedRun++;
+    }
+  }
+  if (droppedRun > 0) out.push(`… [wayfarer: dropped ${droppedRun} lines] …`);
+  const result = out.join('\n');
+  return result.length > MAX_COMPRESSED_CHARS ? hardTruncate(result) : result;
+}
+
+export function compressField(toolName: string, text: string): { text: string; compressed: boolean } {
+  if (text.length <= getCompressThreshold()) return { text, compressed: false };
+  try {
+    const strategy = pickStrategy(toolName, text);
+    const out = strategy === 'log' ? compressLog(text) : compressGeneric(text);
+    if (out.length >= text.length) return { text, compressed: false };
+    return { text: out, compressed: true };
+  } catch {
+    return { text: hardTruncate(text), compressed: true };
+  }
+}
+
+export function compressForStorage(
+  toolName: string,
+  toolInput: string,
+  toolOutput: string,
+): { input: { text: string; compressed: boolean }; output: { text: string; compressed: boolean } } {
+  return {
+    input: compressField(toolName, toolInput),
+    output: compressField(toolName, toolOutput),
+  };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bun test tests/compress.test.ts`
+Expected: PASS (Task 1 + Task 2 cases).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/compress.ts tests/compress.test.ts
+git commit -m "feat: log strategy, field compressor, and storage dispatcher"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
