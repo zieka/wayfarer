@@ -146,4 +146,20 @@ function migrate(db: Database): void {
     db.run('PRAGMA user_version = 3');
     db.run('COMMIT');
   }
+
+  if (version < 4) {
+    db.run('BEGIN');
+    db.run(`
+      CREATE TABLE IF NOT EXISTS observation_originals (
+        observation_id INTEGER PRIMARY KEY,
+        tool_input_full TEXT,
+        tool_output_full TEXT,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (observation_id) REFERENCES observations(id) ON DELETE CASCADE
+      )
+    `);
+    db.run('CREATE INDEX IF NOT EXISTS idx_originals_created ON observation_originals(created_at)');
+    db.run('PRAGMA user_version = 4');
+    db.run('COMMIT');
+  }
 }
