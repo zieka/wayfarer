@@ -674,11 +674,12 @@ git commit -m "feat: build retrieve.js and add the wayfarer-retrieve skill"
 - [ ] **Step 1: Write the failing tests**
 
 ```ts
-// tests/retrieve.test.ts — append (self-contained; own DB + cleanup to avoid coupling to existing helpers).
-import { describe, it, expect, afterEach } from 'bun:test';
-import { unlinkSync } from 'fs';
-import { getDb } from '../src/db';
-import { primerForSession, relevantForPrompt } from '../src/retrieve';
+// tests/retrieve.test.ts — append this describe block at the END of the file.
+// Do NOT re-import describe/it/expect/afterEach, getDb, primerForSession, or
+// relevantForPrompt — they are already imported at the top of this file (from
+// feature #1). Re-importing them would be a duplicate top-level declaration and
+// fail to compile. Add `unlinkSync` to the existing `fs` import only if it isn't
+// already imported. Just add the const + helper + describe below.
 
 const IDDB = '/tmp/wayfarer-test-obsid.db';
 function cleanupId() { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(IDDB + s); } catch {} } }
@@ -830,6 +831,18 @@ git commit -m "feat: surface observation #id in fallback table and search skill"
 
 ## Self-Review
 
-(Appended in the next step.)
+**Spec coverage:** observation-level `retrieveOriginal` (Task 2); tested-fn + built script + skill (Tasks 2–4); reference surfacing — search skill + `#id` fallback (Tasks 4–5); marker unification + detector (Task 1); `created_at === cutoff` boundary (Task 1); three named three-state tests with both directions (Task 2); not-found vs error wording + injected-throw test (Task 3); skill-discovery check (Task 4); no new migration (none present). ✓
+
+**Placeholder scan:** none — every code step carries full code; every run step has an exact command + expected result. ✓
+
+**Type consistency:** `RetrievedField`/`RetrieveResult` defined in Task 2 and consumed by Task 3; `runRetrieve(args, deps?)` signature matches its tests; `ObsRow` gains `id` (Task 5) consistent with `obsLine`/both queries; `compressionMarker`/`COMPRESSION_MARKER_RE` (Task 1) consumed by Task 2. ✓
+
+**Vacuity checks (focused):**
+- Three-state tests build the two states DIRECTLY (INSERT stored text ± an originals row), not via the compression pipeline, so there is no "precondition never met" trap; state 2 embeds a real marker with no originals row, state 3 is marker-free, and both directions are asserted so a broken detector fails at least one side. ✓
+- The thrown-DB-error test injects an `openDb` that throws (a genuine throw, not a missing row) and asserts the error wording AND `not.toContain('no observation with id')`; a corrupt-row variant injects a throwing `retrieve`. ✓
+- The cutoff test computes `cutoff` the same way `pruneOriginals` does and places rows at exactly `cutoff` (kept) and `cutoff-1` (deleted). ✓
+- The `#id` tests trigger the observation fallback (no summaries/embeddings) and assert the dynamic `#<id>`. ✓
+
+**Fix applied:** Task 5's appended test snippet originally re-imported names already imported at the top of `tests/retrieve.test.ts` (feature #1) — a duplicate-declaration compile error. Rewrote the step to add only the new const/helper/describe and not re-import.
 
 <!-- Task detail appended incrementally, one task per commit. -->
