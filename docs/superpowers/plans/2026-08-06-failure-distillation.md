@@ -138,4 +138,105 @@ git commit -m "build: hard-failing tsc --noEmit type-check gate"
 
 ---
 
+### Task 2: Schema v5 (`is_error` column + `corrections` table)
+
+**Files:**
+- Modify: `src/db.ts` (add the `version < 5` migration block)
+- Modify: `tests/db.test.ts` (new-column + new-table tests; bump `user_version` 4 → 5)
+
+**Interfaces:**
+- Consumes: `getDb` (`src/db.ts`).
+- Produces: `observations.is_error INTEGER NOT NULL DEFAULT 0`; a `corrections` table with `UNIQUE(project, content_hash)` and `idx_corrections_project`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/db.test.ts — ADD these tests inside describe('getDb', ...)
+  it('adds is_error column to observations', () => {
+    const db = getDb(TEST_DB);
+    const cols = db.query("PRAGMA table_info(observations)").all() as Array<{ name: string; dflt_value: string | null }>;
+    const isError = cols.find((c) => c.name === 'is_error');
+    expect(isError).toBeDefined();
+    expect(isError!.dflt_value).toBe('0');
+    db.close();
+  });
+
+  it('creates corrections table', () => {
+    const db = getDb(TEST_DB);
+    const t = db.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='corrections'"
+    ).get() as { name: string } | null;
+    expect(t?.name).toBe('corrections');
+    db.close();
+  });
+
+  it('enforces UNIQUE(project, content_hash) on corrections', () => {
+    const db = getDb(TEST_DB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', ['/p', 'a', 'h1', 's1', now]);
+    const dup = db.run('INSERT OR IGNORE INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', ['/p', 'a again', 'h1', 's2', now]);
+    expect(dup.changes).toBe(0); // same (project, content_hash) ignored
+    const diff = db.run('INSERT OR IGNORE INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', ['/p', 'b', 'h2', 's3', now]);
+    expect(diff.changes).toBe(1); // different hash inserts
+    db.close();
+  });
+```
+
+```ts
+// tests/db.test.ts — CHANGE the existing 'runs migrations idempotently' assertion
+// from:  expect(version.user_version).toBe(4);
+//   to:  expect(version.user_version).toBe(5);
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/db.test.ts`
+Expected: FAIL — no `is_error` column, no `corrections` table, `user_version` still 4.
+
+- [ ] **Step 3: Write the migration**
+
+```ts
+// src/db.ts — add after the `if (version < 4) { ... }` block, before migrate()'s closing brace
+  if (version < 5) {
+    db.run('BEGIN');
+    db.run('ALTER TABLE observations ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0');
+    db.run(`
+      CREATE TABLE IF NOT EXISTS corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project TEXT NOT NULL,
+        correction TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        source_session_id TEXT,
+        created_at INTEGER NOT NULL,
+        UNIQUE(project, content_hash)
+      )
+    `);
+    db.run('CREATE INDEX IF NOT EXISTS idx_corrections_project ON corrections(project, created_at DESC)');
+    db.run('PRAGMA user_version = 5');
+    db.run('COMMIT');
+  }
+```
+
+Notes:
+- `ALTER TABLE … ADD COLUMN` with `NOT NULL DEFAULT 0` is valid in SQLite and backfills existing rows with `0`.
+- `source_session_id` has NO foreign key — corrections must outlive their originating session (a pruned/deleted session must not cascade-delete corrections).
+- The `observations_fts` external-content triggers reference named columns only, so the new `is_error` column does not affect FTS.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `bun test tests/db.test.ts`
+Expected: PASS — new column (default `0`), `corrections` table, `UNIQUE` behavior, and `user_version === 5`.
+
+- [ ] **Step 5: Type-check + commit**
+
+Run: `bun run typecheck`
+Expected: exits 0 (no type errors introduced).
+
+```bash
+git add src/db.ts tests/db.test.ts
+git commit -m "feat: schema v5 — observations.is_error and corrections table"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
