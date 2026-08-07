@@ -94,6 +94,10 @@ describe('pickStrategy', () => {
   it('routes plain prose to the generic strategy', () => {
     expect(pickStrategy('Read', 'just some ordinary file contents here')).toBe('generic');
   });
+  it('routes keyword-free stack-frame text to the log strategy', () => {
+    const trace = 'line one\n    at foo (bar.ts:1)\n    at baz (bar.ts:2)\nline four';
+    expect(pickStrategy('Read', trace)).toBe('log');
+  });
 });
 
 describe('compressLog', () => {
@@ -118,6 +122,14 @@ describe('compressLog', () => {
     expect(out).toContain('Traceback (most recent call last):');
     expect(out).toContain('    at foo (bar.ts:1)');
     expect(out).toContain('    at baz (bar.ts:2)');
+  });
+  it('preserves the last line even when the compressed result exceeds the cap', () => {
+    const lines = Array.from({ length: 300 }, (_, i) => `ERROR line ${i} ` + 'z'.repeat(40));
+    lines[lines.length - 1] = 'FINAL-TAIL-LINE-MARKER';
+    const out = compressLog(lines.join('\n'));
+    expect(out.length).toBeLessThanOrEqual(MAX_COMPRESSED_CHARS + 80);
+    expect(out).toContain('FINAL-TAIL-LINE-MARKER');
+    expect(out).toContain('ERROR line 0');
   });
 });
 
