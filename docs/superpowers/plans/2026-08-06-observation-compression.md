@@ -121,6 +121,19 @@ describe('compressGeneric', () => {
     expect(out.length).toBeLessThan(s.length);
     expect(out).toContain('[wayfarer: dropped');
   });
+  it('preserves both head and tail when combined head+tail exceeds the cap', () => {
+    // Long lines so head+tail alone blows past MAX_COMPRESSED_CHARS.
+    const line = (tag: string, i: number) => `${tag}-${i}-` + 'x'.repeat(120);
+    const head = Array.from({ length: HEAD_LINES }, (_, i) => line('HEAD', i));
+    const mid = Array.from({ length: 50 }, (_, i) => line('MID', i));
+    const tail = Array.from({ length: TAIL_LINES }, (_, i) => line('TAIL', i));
+    const out = compressGeneric([...head, ...mid, ...tail].join('\n'));
+    expect(out.length).toBeLessThanOrEqual(MAX_COMPRESSED_CHARS + 80); // cap + marker slack
+    expect(out).toContain('HEAD-0-');                 // head survived
+    expect(out).toContain(`TAIL-${TAIL_LINES - 1}-`); // last tail line survived
+    expect(out).toContain('[wayfarer: dropped');
+    expect(out).not.toContain('MID-25-');             // middle dropped
+  });
 });
 ```
 
@@ -167,11 +180,19 @@ export function hardTruncate(text: string): string {
 export function compressGeneric(text: string): string {
   const lines = text.split('\n');
   if (lines.length > HEAD_LINES + TAIL_LINES + 1) {
-    const head = lines.slice(0, HEAD_LINES);
-    const tail = lines.slice(lines.length - TAIL_LINES);
+    const head = lines.slice(0, HEAD_LINES).join('\n');
+    const tail = lines.slice(lines.length - TAIL_LINES).join('\n');
     const droppedLines = lines.length - HEAD_LINES - TAIL_LINES;
-    const out = [...head, `… [wayfarer: dropped ${droppedLines} lines] …`, ...tail].join('\n');
-    return out.length > MAX_COMPRESSED_CHARS ? hardTruncate(out) : out;
+    const marker = `… [wayfarer: dropped ${droppedLines} lines] …`;
+    const full = `${head}\n${marker}\n${tail}`;
+    if (full.length <= MAX_COMPRESSED_CHARS) return full;
+    // Over cap: budget head and tail independently so BOTH survive (front of
+    // head, end of tail). Never front-slice the whole thing — that drops the tail.
+    const budget = Math.max(0, MAX_COMPRESSED_CHARS - marker.length - 2);
+    const half = Math.floor(budget / 2);
+    const headPart = head.length > half ? head.slice(0, half) : head;
+    const tailPart = tail.length > half ? tail.slice(tail.length - half) : tail;
+    return `${headPart}\n${marker}\n${tailPart}`;
   }
   // Few lines (e.g. one giant line) but over threshold by char count.
   return hardTruncate(text);
