@@ -718,19 +718,21 @@ git commit -m "feat: distill corrections in the worker, decoupled from summary a
 ```ts
 // tests/retrieve.test.ts — append at END. Do NOT re-import describe/it/expect/afterEach,
 // unlinkSync, getDb, or primerForSession — they are already imported at the top of this file.
-
-const PDB = '/tmp/wayfarer-test-pitfalls.db';
-function cleanupPDB() { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(PDB + s); } catch {} } }
-function seedSummary(db: ReturnType<typeof getDb>, project: string, text: string, t: number) {
-  db.run('INSERT OR IGNORE INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s', project, 'x', t]);
-  db.run('INSERT INTO session_summaries (session_id, project, summary, files_read, files_edited, created_at) VALUES (?,?,?,?,?,?)', ['s', project, text, null, null, t]);
-}
-function seedCorrection(db: ReturnType<typeof getDb>, project: string, text: string, hash: string, t: number) {
-  db.run('INSERT INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', [project, text, hash, 's', t]);
-}
+// ALL consts/helpers below are declared INSIDE the describe block so they cannot collide
+// with existing top-level names in this file (e.g. a pre-existing seedSummary/cleanup).
 
 describe('primerForSession — pitfalls injection', () => {
-  afterEach(cleanupPDB);
+  const PDB = '/tmp/wayfarer-test-pitfalls.db';
+  const cleanup = () => { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(PDB + s); } catch {} } };
+  afterEach(cleanup);
+
+  const seedSummary = (db: ReturnType<typeof getDb>, project: string, text: string, t: number) => {
+    db.run('INSERT OR IGNORE INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s', project, 'x', t]);
+    db.run('INSERT INTO session_summaries (session_id, project, summary, files_read, files_edited, created_at) VALUES (?,?,?,?,?,?)', ['s', project, text, null, null, t]);
+  };
+  const seedCorrection = (db: ReturnType<typeof getDb>, project: string, text: string, hash: string, t: number) => {
+    db.run('INSERT INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', [project, text, hash, 's', t]);
+  };
 
   it('prepends a Known pitfalls section ABOVE summaries', () => {
     const db = getDb(PDB);
@@ -890,6 +892,16 @@ git commit -m "feat: inject a Known-pitfalls section at SessionStart"
 
 ## Self-Review
 
-(Appended in the next step.)
+**Spec coverage:** type-check gate (Task 1); schema v5 `is_error` + `corrections` (Task 2); `is_error` capture (Task 3); pairing + dedup + no-pair guard (Task 4); guarded/decoupled worker step (Task 5); pitfalls injection + final gate (Task 6). The deferred `compressed` column is recorded as a follow-up in the spec, not implemented. ✓
+
+**Placeholder scan:** none — every code step has full code; every run step has an exact command + expected result. Task 1's "fix surfaced type errors" is inherently discovery-driven and gives concrete guidance for the likely `fastembed`-types case. ✓
+
+**Vacuity checks (as requested):**
+- No-pair spy guard (Task 4): the fixture seeds a real Bash error AND a real Read success that cannot pair (`tool_name` differs), so `detectErrorRecoveryPairs` returns `[]` and `distillCorrections` returns before `phrase` — `phraseCalls===0` genuinely proves the LLM is unreachable on the no-pair path. Not vacuous.
+- Dedup pair (Task 4): the two "identical" fixtures both normalize to `run npm ci first.` (same sha256 → dedup, direction 1); the "different" fixture normalizes distinctly (different sha256 → inserts, direction 2); `COUNT===2` fails on any collision. Not vacuous.
+
+**Type consistency:** `distillCorrections`/`RecoveryPair`/`ObservationRow` signatures match across Tasks 4↔5; `corrections` columns match across Tasks 2/4/6; `is_error` matches across Tasks 2/3/4; `primerForSession`'s new optional `opts` is backward-compatible with `session-start.ts`'s 2-arg call.
+
+**Fix applied:** Task 6's appended `tests/retrieve.test.ts` block originally declared module-scope helpers (`seedSummary`, `cleanup`, `PDB`) that could collide with existing top-level names in that file (a duplicate-declaration compile error). Moved all consts/helpers INSIDE the `describe` block to scope them.
 
 <!-- Task detail appended incrementally, one task per commit. -->
