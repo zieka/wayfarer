@@ -660,4 +660,176 @@ git commit -m "feat: build retrieve.js and add the wayfarer-retrieve skill"
 
 ---
 
+### Task 5: Surface `#id` (fallback table + search skill) + gate
+
+**Files:**
+- Modify: `src/retrieve.ts`
+- Modify: `tests/retrieve.test.ts`
+- Modify: `plugin/skills/search/SKILL.md`
+
+**Interfaces:**
+- Consumes: existing `ObsRow`, `obsLine`, `formatObservationContext`, `primerForSession`, `relevantForPrompt` (`src/retrieve.ts`).
+- Produces: `ObsRow` gains `id: number`; the observation-fallback table renders an `Id` column showing `#<id>`.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/retrieve.test.ts — append (self-contained; own DB + cleanup to avoid coupling to existing helpers).
+import { describe, it, expect, afterEach } from 'bun:test';
+import { unlinkSync } from 'fs';
+import { getDb } from '../src/db';
+import { primerForSession, relevantForPrompt } from '../src/retrieve';
+
+const IDDB = '/tmp/wayfarer-test-obsid.db';
+function cleanupId() { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(IDDB + s); } catch {} } }
+
+describe('observation-fallback #id column', () => {
+  afterEach(cleanupId);
+
+  it('primerForSession fallback includes the observation #id', () => {
+    const db = getDb(IDDB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s', '/p', now]);
+    const id = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s', '/p', 'Edit', 'edited src/auth.ts', 'ok', 'src/auth.ts', now],
+    ).lastInsertRowid;
+    db.close();
+    const out = primerForSession('/p', IDDB); // no summaries → observation fallback
+    expect(out).toContain('| Id |');
+    expect(out).toContain(`#${Number(id)}`);
+  });
+
+  it('relevantForPrompt observation fallback includes the observation #id', async () => {
+    const db = getDb(IDDB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s', '/p', now]);
+    const id = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s', '/p', 'Bash', 'run widgettest', 'output', null, now],
+    ).lastInsertRowid;
+    db.close();
+    // no summaries + no embeddings → observation FTS fallback; embed stub avoids a model load
+    const out = await relevantForPrompt('/p', 'widgettest', { dbPath: IDDB, embed: async () => new Float32Array([0, 0, 1]) });
+    expect(out).toContain('| Id |');
+    expect(out).toContain(`#${Number(id)}`);
+  });
+});
+```
+
+If any pre-existing test asserted the exact fallback header/separator (e.g. the old `| Time | Tool | Files | Context |` separator row), update it to the new 5-column shape below. The common `toContain('| Time | Tool |')` assertions still pass (that substring survives inside the new header).
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/retrieve.test.ts`
+Expected: FAIL — the fallback has no `Id` column yet (`ObsRow` has no `id`, queries don't select it, `obsLine` doesn't render it).
+
+- [ ] **Step 3: Add the id to `ObsRow`, both queries, and the table**
+
+In `src/retrieve.ts`:
+
+Add `id` to the interface:
+```ts
+export interface ObsRow {
+  id: number;
+  tool_name: string;
+  files_touched: string | null;
+  created_at: number;
+  context: string;
+}
+```
+
+Render an `Id` column in `obsLine`:
+```ts
+export function obsLine(row: ObsRow): string {
+  const time = formatTimeAgo(row.created_at);
+  return `| #${row.id} | ${time} | ${row.tool_name} | ${row.files_touched ?? ''} | ${truncate(row.context, 200)} |`;
+}
+```
+
+Add the `Id` header column in `formatObservationContext`:
+```ts
+export function formatObservationContext(rows: ObsRow[]): string {
+  const header = '## Recent relevant work in this project\n\n| Id | Time | Tool | Files | Context |\n|------|------|------|-------|---------|\n';
+  return `<wayfarer-context>\n${header}${rows.map(obsLine).join('\n')}\n</wayfarer-context>`;
+}
+```
+
+Select `id` in `primerForSession`'s observation fallback:
+```ts
+    const rows = db.query(`
+      SELECT id, tool_name, files_touched, created_at, tool_input AS context
+      FROM observations
+      WHERE project = ?
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(project, CANDIDATE_CAP) as ObsRow[];
+```
+
+Select `o.id` in `relevantForPrompt`'s observation fallback:
+```ts
+        const rows = db.query(`
+          SELECT o.id, o.tool_name, o.files_touched, o.created_at,
+                 snippet(observations_fts, 1, '', '', '...', 32) AS context
+          FROM observations_fts
+          JOIN observations o ON o.id = observations_fts.rowid
+          WHERE observations_fts MATCH ? AND o.project = ?
+          ORDER BY (rank * -1.0) * (1.0 / (1.0 + (? - o.created_at) / 86400.0)) DESC
+          LIMIT ?
+        `).all(ftsQuery, project, now, CANDIDATE_CAP) as ObsRow[];
+```
+
+The summary path (`formatSummaryContext`, `summaryBlock`, `budgetSummaries`) is unchanged — zero added tokens there.
+
+- [ ] **Step 4: Run the retrieve tests**
+
+Run: `bun test tests/retrieve.test.ts`
+Expected: PASS — both new `#id` tests, and the pre-existing retrieve tests still green.
+
+- [ ] **Step 5: Update the search skill to surface id + expandability**
+
+In `plugin/skills/search/SKILL.md`, change the observations query to select the id and left-join the originals, and update the printed line. Replace the observations query with:
+
+```sql
+SELECT o.id, o.tool_name, o.files_touched, o.created_at,
+       snippet(observations_fts, 1, '**', '**', '...', 32) as context,
+       (oo.observation_id IS NOT NULL) AS expandable
+FROM observations_fts
+JOIN observations o ON o.id = observations_fts.rowid
+LEFT JOIN observation_originals oo ON oo.observation_id = o.id
+WHERE observations_fts MATCH ?
+ORDER BY o.created_at DESC
+LIMIT 10
+```
+
+Replace the observations print line with (shows `#id` and a `⤢` when the full original is retrievable):
+```js
+    console.log(\`**\${date}** [\${o.tool_name}] #\${o.id}\${o.expandable ? ' ⤢' : ''} \${o.files_touched || ''} — \${o.context}\\n\`);
+```
+
+Add a one-line note under the Observations output in the skill prose: rows marked `⤢` have the full original available via the `wayfarer-retrieve` skill (`bun "$CLAUDE_PLUGIN_ROOT/scripts/retrieve.js" <id>`).
+
+- [ ] **Step 6: Full-suite + build gate**
+
+Run: `bun test`
+Expected: entire suite PASS (`N pass, 0 fail`; ignore the trailing Bun panic/exit-133 per the Global Constraints note).
+
+Run: `bun run build`
+Expected: `Built 4 hooks + summarize-worker + retrieve to plugin/scripts/` with no errors.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/retrieve.ts tests/retrieve.test.ts plugin/skills/search/SKILL.md
+git commit -m "feat: surface observation #id in fallback table and search skill"
+```
+
+---
+
+## Self-Review
+
+(Appended in the next step.)
+
 <!-- Task detail appended incrementally, one task per commit. -->
