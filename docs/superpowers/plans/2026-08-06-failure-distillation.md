@@ -356,4 +356,260 @@ git commit -m "feat: capture is_error on each observation at PostToolUse"
 
 ---
 
+### Task 4: `src/distill.ts` core
+
+**Files:**
+- Create: `src/distill.ts`
+- Test: `tests/distill.test.ts`
+
+**Interfaces:**
+- Consumes: `getDb` (tests); the `observations.is_error` column + `corrections` table (Task 2); `bun:sqlite` `Database` type; `node:crypto`.
+- Produces:
+  - `interface ObservationRow { id; tool_name; tool_input; tool_output; files_touched: string|null; is_error: number; created_at }`
+  - `interface RecoveryPair { error: ObservationRow; recovery: ObservationRow }`
+  - `normalizeTarget(toolName, toolInput, filesTouched): string`
+  - `detectErrorRecoveryPairs(observations): RecoveryPair[]`
+  - `correctionHash(text): string` — sha256 of normalized text, first 16 hex chars (project is NOT in the hash; per-project scoping comes from the table's `UNIQUE(project, content_hash)`)
+  - `distillCorrections(db, sessionId, project, phrase): Promise<number>` — `phrase` is REQUIRED and injected; distill.ts never spawns `claude`.
+- **Critical:** `distillCorrections` returns `0` BEFORE `phrase` is referenced when there are no pairs.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/distill.test.ts
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { unlinkSync } from 'fs';
+import { getDb } from '../src/db';
+import {
+  normalizeTarget, detectErrorRecoveryPairs, correctionHash, distillCorrections,
+  type ObservationRow, type RecoveryPair,
+} from '../src/distill';
+
+const DB = '/tmp/wayfarer-test-distill.db';
+function cleanup() { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(DB + s); } catch {} } }
+
+function row(p: Partial<ObservationRow> & { tool_name: string; is_error: number; created_at: number }): ObservationRow {
+  return {
+    id: p.id ?? 0, tool_name: p.tool_name, tool_input: p.tool_input ?? '',
+    tool_output: p.tool_output ?? '', files_touched: p.files_touched ?? null,
+    is_error: p.is_error, created_at: p.created_at,
+  };
+}
+function seedObs(db: ReturnType<typeof getDb>, sessionId: string, o: { tool_name: string; tool_input: string; is_error: number; created_at: number }): number {
+  db.run('INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?,?,?)', [sessionId, '/p', o.created_at]);
+  return Number(db.run(
+    `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, is_error, created_at)
+     VALUES (?,?,?,?,?,?,?,?)`,
+    [sessionId, '/p', o.tool_name, o.tool_input, '', null, o.is_error, o.created_at],
+  ).lastInsertRowid);
+}
+function seedRecoverablePair(db: ReturnType<typeof getDb>, sessionId: string, cmd: string, t: number) {
+  seedObs(db, sessionId, { tool_name: 'Bash', tool_input: JSON.stringify({ command: cmd }), is_error: 1, created_at: t });
+  seedObs(db, sessionId, { tool_name: 'Bash', tool_input: JSON.stringify({ command: cmd }), is_error: 0, created_at: t + 1 });
+}
+
+describe('normalizeTarget', () => {
+  it('extracts the Bash command from JSON tool_input (whitespace-collapsed)', () => {
+    expect(normalizeTarget('Bash', JSON.stringify({ command: 'npm   test' }), null)).toBe('npm test');
+  });
+  it('extracts the file_path from JSON tool_input', () => {
+    expect(normalizeTarget('Edit', JSON.stringify({ file_path: '/p/src/a.ts' }), null)).toBe('/p/src/a.ts');
+  });
+  it('falls back to first files_touched, then raw input', () => {
+    expect(normalizeTarget('Read', 'not json', 'src/a.ts,src/b.ts')).toBe('src/a.ts');
+    expect(normalizeTarget('Unknown', 'plain', null)).toBe('plain');
+  });
+});
+
+describe('detectErrorRecoveryPairs', () => {
+  const T = (n: number) => 1000 + n;
+  it('pairs an error with the EARLIEST later same-target success', () => {
+    const rows: ObservationRow[] = [
+      row({ id: 1, tool_name: 'Bash', tool_input: JSON.stringify({ command: 'npm test' }), is_error: 1, created_at: T(1) }),
+      row({ id: 2, tool_name: 'Bash', tool_input: JSON.stringify({ command: 'npm test' }), is_error: 0, created_at: T(3) }),
+      row({ id: 3, tool_name: 'Bash', tool_input: JSON.stringify({ command: 'npm test' }), is_error: 0, created_at: T(5) }),
+    ];
+    const pairs = detectErrorRecoveryPairs(rows);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].error.id).toBe(1);
+    expect(pairs[0].recovery.id).toBe(2);
+  });
+  it('no pair when the later success is on a different target', () => {
+    expect(detectErrorRecoveryPairs([
+      row({ id: 1, tool_name: 'Bash', tool_input: JSON.stringify({ command: 'npm test' }), is_error: 1, created_at: T(1) }),
+      row({ id: 2, tool_name: 'Bash', tool_input: JSON.stringify({ command: 'ls' }), is_error: 0, created_at: T(3) }),
+    ])).toHaveLength(0);
+  });
+  it('no pair when the error is never followed by a same-target success', () => {
+    expect(detectErrorRecoveryPairs([
+      row({ id: 1, tool_name: 'Bash', tool_input: JSON.stringify({ command: 'npm test' }), is_error: 1, created_at: T(1) }),
+      row({ id: 2, tool_name: 'Bash', tool_input: JSON.stringify({ command: 'npm test' }), is_error: 1, created_at: T(3) }),
+    ])).toHaveLength(0);
+  });
+});
+
+describe('correctionHash', () => {
+  it('collides on case/whitespace-normalized text, differs on distinct text', () => {
+    expect(correctionHash('Run npm ci  first')).toBe(correctionHash('run   NPM CI first'));
+    expect(correctionHash('a')).not.toBe(correctionHash('b'));
+  });
+});
+
+describe('distillCorrections — no-pair guard', () => {
+  beforeEach(cleanup); afterEach(cleanup);
+  it('emits zero corrections AND never invokes phrase when there is no error→recovery pair', async () => {
+    const db = getDb(DB);
+    // an unrecovered error (no later same-target success) + an unrelated success
+    seedObs(db, 's1', { tool_name: 'Bash', tool_input: JSON.stringify({ command: 'npm test' }), is_error: 1, created_at: 1000 });
+    seedObs(db, 's1', { tool_name: 'Read', tool_input: JSON.stringify({ file_path: '/p/x.ts' }), is_error: 0, created_at: 1001 });
+    let phraseCalls = 0;
+    const spy = async (_pairs: RecoveryPair[]) => { phraseCalls++; return ['SHOULD NOT BE WRITTEN']; };
+    const inserted = await distillCorrections(db, 's1', '/p', spy);
+    expect(inserted).toBe(0);
+    expect(phraseCalls).toBe(0); // the LLM must be unreachable on the no-pair path
+    expect((db.query('SELECT COUNT(*) AS n FROM corrections').get() as { n: number }).n).toBe(0);
+    db.close();
+  });
+});
+
+describe('distillCorrections — insertion + dedup both directions', () => {
+  beforeEach(cleanup); afterEach(cleanup);
+  it('inserts a correction for a real error→recovery pair', async () => {
+    const db = getDb(DB);
+    seedRecoverablePair(db, 's1', 'npm test', 1000);
+    expect(await distillCorrections(db, 's1', '/p', async () => ['Run npm ci before npm test.'])).toBe(1);
+    expect((db.query('SELECT correction FROM corrections WHERE project = ?').get('/p') as { correction: string }).correction)
+      .toBe('Run npm ci before npm test.');
+    db.close();
+  });
+  it('dedups an identical correction and does NOT swallow a different one', async () => {
+    const db = getDb(DB);
+    seedRecoverablePair(db, 's1', 'npm test', 1000);
+    seedRecoverablePair(db, 's2', 'npm test', 2000);
+    seedRecoverablePair(db, 's3', 'npm test', 3000);
+    expect(await distillCorrections(db, 's1', '/p', async () => ['Run npm ci first.'])).toBe(1);
+    expect(await distillCorrections(db, 's2', '/p', async () => ['run   NPM CI first.'])).toBe(0); // normalized-identical → ignored
+    expect(await distillCorrections(db, 's3', '/p', async () => ['Pin the Node version in .nvmrc.'])).toBe(1); // different → inserted
+    expect((db.query('SELECT COUNT(*) AS n FROM corrections WHERE project = ?').get('/p') as { n: number }).n).toBe(2);
+    db.close();
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/distill.test.ts`
+Expected: FAIL — cannot resolve `../src/distill` / exports undefined.
+
+- [ ] **Step 3: Write the implementation**
+
+```ts
+// src/distill.ts
+import type { Database } from 'bun:sqlite';
+import { createHash } from 'node:crypto';
+
+export interface ObservationRow {
+  id: number;
+  tool_name: string;
+  tool_input: string;
+  tool_output: string;
+  files_touched: string | null;
+  is_error: number;
+  created_at: number;
+}
+
+export interface RecoveryPair {
+  error: ObservationRow;
+  recovery: ObservationRow;
+}
+
+const BASH_TOOLS = new Set(['Bash', 'BashOutput']);
+
+export function normalizeTarget(toolName: string, toolInput: string, filesTouched: string | null): string {
+  let target = '';
+  try {
+    const parsed = JSON.parse(toolInput) as Record<string, unknown>;
+    if (parsed && typeof parsed === 'object') {
+      if (BASH_TOOLS.has(toolName) && typeof parsed.command === 'string') target = parsed.command;
+      else if (typeof parsed.file_path === 'string') target = parsed.file_path;
+    }
+  } catch {
+    // tool_input isn't JSON — fall through to the fallbacks
+  }
+  if (!target && filesTouched) target = filesTouched.split(',')[0] ?? '';
+  if (!target) target = toolInput;
+  return target.trim().replace(/\s+/g, ' ');
+}
+
+export function detectErrorRecoveryPairs(observations: ObservationRow[]): RecoveryPair[] {
+  const sorted = [...observations].sort((a, b) => a.created_at - b.created_at || a.id - b.id);
+  const pairs: RecoveryPair[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    const error = sorted[i];
+    if (error.is_error !== 1) continue;
+    const target = normalizeTarget(error.tool_name, error.tool_input, error.files_touched);
+    for (let j = i + 1; j < sorted.length; j++) {
+      const recovery = sorted[j];
+      if (recovery.is_error !== 0) continue;
+      if (recovery.tool_name !== error.tool_name) continue;
+      if (normalizeTarget(recovery.tool_name, recovery.tool_input, recovery.files_touched) !== target) continue;
+      pairs.push({ error, recovery });
+      break; // earliest later success
+    }
+  }
+  return pairs;
+}
+
+export function correctionHash(text: string): string {
+  const normalized = text.trim().toLowerCase().replace(/\s+/g, ' ');
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 16);
+}
+
+export async function distillCorrections(
+  db: Database,
+  sessionId: string,
+  project: string,
+  phrase: (pairs: RecoveryPair[]) => Promise<string[]>,
+): Promise<number> {
+  const observations = db.query(
+    `SELECT id, tool_name, tool_input, tool_output, files_touched, is_error, created_at
+     FROM observations WHERE session_id = ? ORDER BY created_at ASC`,
+  ).all(sessionId) as ObservationRow[];
+
+  const pairs = detectErrorRecoveryPairs(observations);
+  if (pairs.length === 0) return 0; // no observed recovery → never call phrase, never write a fabricated fix
+
+  const corrections = await phrase(pairs);
+  const now = Math.floor(Date.now() / 1000);
+  let inserted = 0;
+  for (const raw of corrections) {
+    const text = (raw ?? '').trim();
+    if (!text) continue;
+    const res = db.run(
+      'INSERT OR IGNORE INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?, ?, ?, ?, ?)',
+      [project, text, correctionHash(text), sessionId, now],
+    );
+    if (res.changes > 0) inserted++;
+  }
+  return inserted;
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `bun test tests/distill.test.ts`
+Expected: PASS — including the no-pair guard (spy asserted un-called) and dedup-both-directions.
+
+- [ ] **Step 5: Type-check + commit**
+
+Run: `bun run typecheck`
+Expected: exits 0.
+
+```bash
+git add src/distill.ts tests/distill.test.ts
+git commit -m "feat: distill error→recovery pairs into deduped corrections"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
