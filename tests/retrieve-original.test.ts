@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { unlinkSync } from 'fs';
 import { getDb } from '../src/db';
 import { compressionMarker } from '../src/compress';
-import { retrieveOriginal, formatRetrieveResult } from '../src/retrieve-original';
+import { retrieveOriginal, formatRetrieveResult, runRetrieve } from '../src/retrieve-original';
 
 const DB = '/tmp/wayfarer-test-retrieve.db';
 
@@ -117,5 +117,47 @@ describe('formatRetrieveResult', () => {
     expect(out).toContain('full in');
     expect(out).toContain('compressed out');
     expect(out).toContain('original expired');
+  });
+});
+
+describe('runRetrieve (CLI core)', () => {
+  beforeEach(cleanup);
+  afterEach(cleanup);
+
+  it('formats a found observation for a valid id', () => {
+    const db = getDb(DB);
+    const id = seedObservation(db, { toolInput: 'echo hi', toolOutput: 'hi there' });
+    db.close();
+    const out = runRetrieve([String(id), DB]);
+    expect(out).toContain(`Observation #${id}`);
+    expect(out).toContain('hi there');
+  });
+
+  it('returns a usage message for a missing or non-numeric id', () => {
+    expect(runRetrieve([])).toContain('positive integer observation id');
+    expect(runRetrieve(['abc'])).toContain('positive integer observation id');
+    expect(runRetrieve(['0'])).toContain('positive integer observation id');
+    expect(runRetrieve(['-3'])).toContain('positive integer observation id');
+  });
+
+  it('returns not-found wording for an unknown id (real DB)', () => {
+    const db = getDb(DB); db.close(); // materialize the schema
+    const out = runRetrieve(['4242', DB]);
+    expect(out).toContain('no observation with id 4242');
+  });
+
+  it('a thrown DB error produces the ERROR wording, NOT the not-found wording', () => {
+    const boom = ((_p?: string) => { throw new Error('database disk image is malformed'); });
+    const out = runRetrieve(['5'], { openDb: boom });
+    expect(out).toContain('error retrieving observation 5');
+    expect(out).toContain('database disk image is malformed');
+    expect(out).not.toContain('no observation with id'); // a broken DB must NOT read as not-found
+  });
+
+  it('a corrupt-row error (retrieve throws) also produces the error wording, not not-found', () => {
+    const throwingRetrieve = ((_db: unknown, _id: number) => { throw new Error('corrupt row'); }) as typeof retrieveOriginal;
+    const out = runRetrieve(['6', DB], { retrieve: throwingRetrieve });
+    expect(out).toContain('error retrieving observation 6');
+    expect(out).not.toContain('no observation with id');
   });
 });

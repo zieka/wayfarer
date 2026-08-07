@@ -1,5 +1,6 @@
 import type { Database } from 'bun:sqlite';
 import { COMPRESSION_MARKER_RE } from './compress';
+import { getDb } from './db';
 
 export interface RetrievedField {
   text: string;
@@ -54,4 +55,33 @@ export function formatRetrieveResult(r: RetrieveResult): string {
   };
   return `## Observation #${r.observationId} — ${r.toolName} @ ${when}\n` +
     field('Input', r.input) + field('Output', r.output);
+}
+
+export function runRetrieve(
+  args: string[],
+  deps: { openDb?: (dbPath?: string) => Database; retrieve?: typeof retrieveOriginal } = {},
+): string {
+  const idArg = args[0];
+  const id = Number(idArg);
+  if (!idArg || !Number.isInteger(id) || id <= 0) {
+    return 'wayfarer-retrieve: provide a positive integer observation id\n';
+  }
+  const openDb = deps.openDb ?? getDb;
+  const retrieve = deps.retrieve ?? retrieveOriginal;
+  let db: Database | undefined;
+  try {
+    db = openDb(args[1]);
+    return formatRetrieveResult(retrieve(db, id));
+  } catch (e) {
+    // Real failure (DB unreadable, corrupt row): distinct from not-found so a broken
+    // DB never silently reads to the model as "that observation does not exist".
+    return `wayfarer-retrieve: error retrieving observation ${id}: ${e instanceof Error ? e.message : String(e)}\n`;
+  } finally {
+    db?.close();
+  }
+}
+
+if (import.meta.main) {
+  process.stdout.write(runRetrieve(process.argv.slice(2)));
+  process.exit(0);
 }
