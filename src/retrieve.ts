@@ -44,6 +44,7 @@ export interface SummaryItem {
 }
 
 export interface ObsRow {
+  id: number;
   tool_name: string;
   files_touched: string | null;
   created_at: number;
@@ -83,7 +84,7 @@ export function summaryBlock(item: SummaryItem): string {
 
 export function obsLine(row: ObsRow): string {
   const time = formatTimeAgo(row.created_at);
-  return `| ${time} | ${row.tool_name} | ${row.files_touched ?? ''} | ${truncate(row.context, 200)} |`;
+  return `| #${row.id} | ${time} | ${row.tool_name} | ${row.files_touched ?? ''} | ${truncate(row.context, 200)} |`;
 }
 
 export function formatSummaryContext(items: SummaryItem[], header: string): string {
@@ -92,7 +93,7 @@ export function formatSummaryContext(items: SummaryItem[], header: string): stri
 }
 
 export function formatObservationContext(rows: ObsRow[]): string {
-  const header = '## Recent relevant work in this project\n\n| Time | Tool | Files | Context |\n|------|------|-------|---------|\n';
+  const header = '## Recent relevant work in this project\n\n| Id | Time | Tool | Files | Context |\n|------|------|------|-------|---------|\n';
   return `<wayfarer-context>\n${header}${rows.map(obsLine).join('\n')}\n</wayfarer-context>`;
 }
 
@@ -188,7 +189,7 @@ export async function relevantForPrompt(
     if (ftsQuery) {
       try {
         const rows = db.query(`
-          SELECT o.tool_name, o.files_touched, o.created_at,
+          SELECT o.id, o.tool_name, o.files_touched, o.created_at,
                  snippet(observations_fts, 1, '', '', '...', 32) AS context
           FROM observations_fts
           JOIN observations o ON o.id = observations_fts.rowid
@@ -228,7 +229,7 @@ export function primerForSession(project: string, dbPath?: string): string | nul
     }
 
     const rows = db.query(`
-      SELECT tool_name, files_touched, created_at, tool_input AS context
+      SELECT id, tool_name, files_touched, created_at, tool_input AS context
       FROM observations
       WHERE project = ?
       ORDER BY created_at DESC

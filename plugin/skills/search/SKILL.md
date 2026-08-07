@@ -49,10 +49,12 @@ if (summaries.length > 0) {
 
 // Search observations
 const observations = db.query(\`
-  SELECT o.tool_name, o.files_touched, o.created_at,
-         snippet(observations_fts, 1, '**', '**', '...', 32) as context
+  SELECT o.id, o.tool_name, o.files_touched, o.created_at,
+         snippet(observations_fts, 1, '**', '**', '...', 32) as context,
+         (oo.observation_id IS NOT NULL) AS expandable
   FROM observations_fts
   JOIN observations o ON o.id = observations_fts.rowid
+  LEFT JOIN observation_originals oo ON oo.observation_id = o.id
   WHERE observations_fts MATCH ?
   ORDER BY o.created_at DESC
   LIMIT 10
@@ -62,7 +64,7 @@ if (observations.length > 0) {
   console.log('## Observations\\n');
   for (const o of observations) {
     const date = new Date(o.created_at * 1000).toLocaleString();
-    console.log(\`**\${date}** [\${o.tool_name}] \${o.files_touched || ''} — \${o.context}\\n\`);
+    console.log(\`**\${date}** [\${o.tool_name}] #\${o.id}\${o.expandable ? ' ⤢' : ''} \${o.files_touched || ''} — \${o.context}\\n\`);
   }
 }
 
@@ -75,6 +77,8 @@ db.close();
 ```
 
 Replace `$ARGUMENTS` with the user's search query.
+
+Rows marked `⤢` have the full original available via the `wayfarer-retrieve` skill (`bun "$CLAUDE_PLUGIN_ROOT/scripts/retrieve.js" <id>`).
 
 ## Tips
 

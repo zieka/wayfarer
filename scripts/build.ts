@@ -37,4 +37,17 @@ await build({
   banner: { js: '#!/usr/bin/env bun' },
 });
 
-console.log(`Built ${hooks.length} hooks + summarize-worker to plugin/scripts/`);
+// Build the retrieve CLI (invoked by the wayfarer-retrieve skill)
+await build({
+  entryPoints: ['src/retrieve-original.ts'],
+  bundle: true,
+  outfile: 'plugin/scripts/retrieve.js',
+  platform: 'node',
+  target: 'esnext',
+  format: 'esm',
+  minify: false,
+  external: ['bun:sqlite', 'fastembed', 'onnxruntime-node'],
+  banner: { js: '#!/usr/bin/env bun' },
+});
+
+console.log(`Built ${hooks.length} hooks + summarize-worker + retrieve to plugin/scripts/`);

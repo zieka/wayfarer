@@ -94,7 +94,7 @@ describe('formatSummaryContext', () => {
 describe('formatObservationContext', () => {
   it('renders the markdown table', () => {
     const rows: ObsRow[] = [
-      { tool_name: 'Edit', files_touched: 'src/auth.ts', created_at: NOW - 3600, context: 'edited auth' },
+      { id: 1, tool_name: 'Edit', files_touched: 'src/auth.ts', created_at: NOW - 3600, context: 'edited auth' },
     ];
     const out = formatObservationContext(rows);
     expect(out).toContain('| Time | Tool | Files | Context |');
@@ -250,5 +250,43 @@ describe('relevantForPrompt', () => {
     });
     expect(out).toContain('| Time | Tool |');
     expect(out).toContain('widget');
+  });
+});
+
+const IDDB = '/tmp/wayfarer-test-obsid.db';
+function cleanupId() { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(IDDB + s); } catch {} } }
+
+describe('observation-fallback #id column', () => {
+  afterEach(cleanupId);
+
+  it('primerForSession fallback includes the observation #id', () => {
+    const db = getDb(IDDB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s', '/p', now]);
+    const id = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s', '/p', 'Edit', 'edited src/auth.ts', 'ok', 'src/auth.ts', now],
+    ).lastInsertRowid;
+    db.close();
+    const out = primerForSession('/p', IDDB); // no summaries → observation fallback
+    expect(out).toContain('| Id |');
+    expect(out).toContain(`#${Number(id)}`);
+  });
+
+  it('relevantForPrompt observation fallback includes the observation #id', async () => {
+    const db = getDb(IDDB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s', '/p', now]);
+    const id = db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s', '/p', 'Bash', 'run widgettest', 'output', null, now],
+    ).lastInsertRowid;
+    db.close();
+    // no summaries + no embeddings → observation FTS fallback; embed stub avoids a model load
+    const out = await relevantForPrompt('/p', 'widgettest', { dbPath: IDDB, embed: async () => new Float32Array([0, 0, 1]) });
+    expect(out).toContain('| Id |');
+    expect(out).toContain(`#${Number(id)}`);
   });
 });

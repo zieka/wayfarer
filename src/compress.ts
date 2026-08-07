@@ -10,6 +10,14 @@ export const SUMMARY_LINES = 10;
 export const MAX_SIGNAL_LINES = 100;
 export const MAX_COMPRESSED_CHARS = 4096;
 
+export function compressionMarker(detail: string): string {
+  return `… [wayfarer: ${detail}] …`;
+}
+
+// No `g` flag — `.test()` must be stateless. Distinguishes a compressed-but-pruned
+// field (marker present, original gone) from a never-compressed field.
+export const COMPRESSION_MARKER_RE = /\[wayfarer: [^\]]*\]/;
+
 function envInt(name: string, fallback: number): number {
   const raw = process.env[name];
   if (!raw) return fallback;
@@ -28,7 +36,7 @@ export function getOriginalsTtlDays(): number {
 export function hardTruncate(text: string): string {
   if (text.length <= MAX_COMPRESSED_CHARS) return text;
   const dropped = text.length - MAX_COMPRESSED_CHARS;
-  return text.slice(0, MAX_COMPRESSED_CHARS) + `\n… [wayfarer: dropped ${dropped} chars] …`;
+  return text.slice(0, MAX_COMPRESSED_CHARS) + '\n' + compressionMarker(`dropped ${dropped} chars`);
 }
 
 export function compressGeneric(text: string): string {
@@ -37,7 +45,7 @@ export function compressGeneric(text: string): string {
     const head = lines.slice(0, HEAD_LINES).join('\n');
     const tail = lines.slice(lines.length - TAIL_LINES).join('\n');
     const droppedLines = lines.length - HEAD_LINES - TAIL_LINES;
-    const marker = `… [wayfarer: dropped ${droppedLines} lines] …`;
+    const marker = compressionMarker(`dropped ${droppedLines} lines`);
     const full = `${head}\n${marker}\n${tail}`;
     if (full.length <= MAX_COMPRESSED_CHARS) return full;
     // Over cap: budget head and tail independently so BOTH survive (front of
@@ -78,16 +86,16 @@ export function compressLog(text: string): string {
   let droppedRun = 0;
   for (let i = 0; i < lines.length; i++) {
     if (keep[i]) {
-      if (droppedRun > 0) { out.push(`… [wayfarer: dropped ${droppedRun} lines] …`); droppedRun = 0; }
+      if (droppedRun > 0) { out.push(compressionMarker(`dropped ${droppedRun} lines`)); droppedRun = 0; }
       out.push(lines[i]);
     } else {
       droppedRun++;
     }
   }
-  if (droppedRun > 0) out.push(`… [wayfarer: dropped ${droppedRun} lines] …`);
+  if (droppedRun > 0) out.push(compressionMarker(`dropped ${droppedRun} lines`));
   const result = out.join('\n');
   if (result.length <= MAX_COMPRESSED_CHARS) return result;
-  const sizeMarker = '… [wayfarer: dropped middle for size] …';
+  const sizeMarker = compressionMarker('dropped middle for size');
   const budget = Math.max(0, MAX_COMPRESSED_CHARS - sizeMarker.length - 2);
   const half = Math.floor(budget / 2);
   return `${result.slice(0, half)}\n${sizeMarker}\n${result.slice(result.length - half)}`;
