@@ -69,4 +69,16 @@ describe('compressGeneric', () => {
     expect(out.length).toBeLessThan(s.length);
     expect(out).toContain('[wayfarer: dropped');
   });
+  it('preserves both head and tail when combined head+tail exceeds the cap', () => {
+    const line = (tag: string, i: number) => `${tag}-${i}-` + 'x'.repeat(120);
+    const head = Array.from({ length: HEAD_LINES }, (_, i) => line('HEAD', i));
+    const mid = Array.from({ length: 50 }, (_, i) => line('MID', i));
+    const tail = Array.from({ length: TAIL_LINES }, (_, i) => line('TAIL', i));
+    const out = compressGeneric([...head, ...mid, ...tail].join('\n'));
+    expect(out.length).toBeLessThanOrEqual(MAX_COMPRESSED_CHARS + 80);
+    expect(out).toContain('HEAD-0-');
+    expect(out).toContain(`TAIL-${TAIL_LINES - 1}-`);
+    expect(out).toContain('[wayfarer: dropped');
+    expect(out).not.toContain('MID-25-');
+  });
 });
