@@ -290,3 +290,68 @@ describe('observation-fallback #id column', () => {
     expect(out).toContain(`#${Number(id)}`);
   });
 });
+
+// tests/retrieve.test.ts — append at END. Do NOT re-import describe/it/expect/afterEach,
+// unlinkSync, getDb, or primerForSession — they are already imported at the top of this file.
+// ALL consts/helpers below are declared INSIDE the describe block so they cannot collide
+// with existing top-level names in this file (e.g. a pre-existing seedSummary/cleanup).
+
+describe('primerForSession — pitfalls injection', () => {
+  const PDB = '/tmp/wayfarer-test-pitfalls.db';
+  const cleanup = () => { for (const s of ['', '-wal', '-shm']) { try { unlinkSync(PDB + s); } catch {} } };
+  afterEach(cleanup);
+
+  const seedSummary = (db: ReturnType<typeof getDb>, project: string, text: string, t: number) => {
+    db.run('INSERT OR IGNORE INTO sessions (session_id, project, prompt, started_at) VALUES (?,?,?,?)', ['s', project, 'x', t]);
+    db.run('INSERT INTO session_summaries (session_id, project, summary, files_read, files_edited, created_at) VALUES (?,?,?,?,?,?)', ['s', project, text, null, null, t]);
+  };
+  const seedCorrection = (db: ReturnType<typeof getDb>, project: string, text: string, hash: string, t: number) => {
+    db.run('INSERT INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', [project, text, hash, 's', t]);
+  };
+
+  it('prepends a Known pitfalls section ABOVE summaries', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedSummary(db, '/p', 'Did a thing.', now);
+    seedCorrection(db, '/p', 'Run npm ci before npm test.', 'h1', now);
+    db.close();
+    const out = primerForSession('/p', PDB);
+    expect(out).toContain('## Known pitfalls in this project');
+    expect(out).toContain('Run npm ci before npm test.');
+    expect(out).toContain('Did a thing.');
+    expect(out!.indexOf('Known pitfalls')).toBeLessThan(out!.indexOf('Did a thing.'));
+  });
+
+  it('adds no pitfalls section when there are no corrections (summary path unchanged)', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedSummary(db, '/p', 'Did a thing.', now);
+    db.close();
+    const out = primerForSession('/p', PDB);
+    expect(out).not.toContain('Known pitfalls');
+    expect(out).toContain('Did a thing.');
+  });
+
+  it('returns just the pitfalls section when corrections exist but no summaries/observations', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedCorrection(db, '/only', 'Avoid X.', 'h1', now);
+    db.close();
+    const out = primerForSession('/only', PDB);
+    expect(out).toContain('## Known pitfalls in this project');
+    expect(out).toContain('Avoid X.');
+  });
+
+  it('degrades to no pitfalls section (and never throws) when the pitfalls query fails', () => {
+    const db = getDb(PDB);
+    const now = Math.floor(Date.now() / 1000);
+    seedSummary(db, '/p', 'Did a thing.', now);
+    db.close();
+    let out: string | null = null;
+    expect(() => { out = primerForSession('/p', PDB, { pitfalls: () => { throw new Error('boom'); } }); }).not.toThrow();
+    // TS narrows `out` to `null` here since the assignment above is inside a closure passed
+    // to expect(); cast restores the declared type without changing runtime behavior.
+    expect(out as string | null).toContain('Did a thing.');
+    expect(out as string | null).not.toContain('Known pitfalls');
+  });
+});

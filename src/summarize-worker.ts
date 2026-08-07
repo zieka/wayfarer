@@ -10,6 +10,7 @@
 import { getDb } from './db';
 import { formatObservations, parseSummaryResponse } from './summarize';
 import { pruneOriginals } from './compress';
+import { distillCorrections, type RecoveryPair } from './distill';
 import { spawn } from 'child_process';
 
 const sessionId = process.argv[2];
@@ -25,6 +26,36 @@ const SYSTEM_PROMPT = `You are a concise technical summarizer. Given a list of t
 - "files_edited": array of file paths that were created or modified
 
 Focus on what changed and why, not the mechanics of each tool call. Respond with only the JSON object, no markdown fencing.`;
+
+const DISTILL_PROMPT = `You are distilling durable "pitfall" corrections from a coding session. You are given error→recovery pairs: a tool call that FAILED, then a later call on the same target that SUCCEEDED. For each pair where the recovery clearly shows how to avoid the original failure, output ONE terse imperative correction (max ~20 words). If a pair does not clearly imply a reusable fix, omit it. Respond with ONLY a JSON array of strings, e.g. ["Run npm ci before npm test."]. No prose, no fencing.`;
+
+async function distillPhrase(pairs: RecoveryPair[]): Promise<string[]> {
+  const payload = pairs.map((p, i) => ({
+    n: i + 1,
+    tool: p.error.tool_name,
+    failed_input: p.error.tool_input.slice(0, 500),
+    error_output: p.error.tool_output.slice(0, 500),
+    recovery_input: p.recovery.tool_input.slice(0, 500),
+  }));
+  const prompt = `${DISTILL_PROMPT}\n\nPairs:\n${JSON.stringify(payload, null, 2)}`;
+  const responseText = await new Promise<string>((resolve, reject) => {
+    const child = spawn('claude', ['-p', prompt], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
+    child.stderr.on('data', () => {});
+    child.on('close', (code) => {
+      if (code === 0 && stdout.trim()) resolve(stdout.trim());
+      else reject(new Error(`claude -p exited with code ${code}`));
+    });
+    child.on('error', reject);
+  });
+  try {
+    const parsed = JSON.parse(responseText);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return []; // unparseable model output → no corrections (conservative)
+  }
+}
 
 try {
   const db = getDb(dbPath);
@@ -43,6 +74,15 @@ try {
   if (!session) {
     db.close();
     process.exit(0);
+  }
+
+  // Distill error→recovery corrections. Independently guarded and placed BEFORE summary
+  // generation: a summary failure can't skip it, and its own failure can't touch the
+  // summary or the prune. Gated inside distillCorrections — no pair → no claude call.
+  try {
+    await distillCorrections(db, sessionId, session.project, distillPhrase);
+  } catch (e) {
+    console.error(`wayfarer: distillation failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   const observations = db.query(

@@ -162,4 +162,23 @@ function migrate(db: Database): void {
     db.run('PRAGMA user_version = 4');
     db.run('COMMIT');
   }
+
+  if (version < 5) {
+    db.run('BEGIN');
+    db.run('ALTER TABLE observations ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0');
+    db.run(`
+      CREATE TABLE IF NOT EXISTS corrections (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        project TEXT NOT NULL,
+        correction TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        source_session_id TEXT,
+        created_at INTEGER NOT NULL,
+        UNIQUE(project, content_hash)
+      )
+    `);
+    db.run('CREATE INDEX IF NOT EXISTS idx_corrections_project ON corrections(project, created_at DESC)');
+    db.run('PRAGMA user_version = 5');
+    db.run('COMMIT');
+  }
 }

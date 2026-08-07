@@ -86,7 +86,36 @@ describe('getDb', () => {
     db1.close();
     const db2 = getDb(TEST_DB);
     const version = db2.query("PRAGMA user_version").get() as { user_version: number };
-    expect(version.user_version).toBe(4);
+    expect(version.user_version).toBe(5);
     db2.close();
+  });
+
+  it('adds is_error column to observations', () => {
+    const db = getDb(TEST_DB);
+    const cols = db.query("PRAGMA table_info(observations)").all() as Array<{ name: string; dflt_value: string | null }>;
+    const isError = cols.find((c) => c.name === 'is_error');
+    expect(isError).toBeDefined();
+    expect(isError!.dflt_value).toBe('0');
+    db.close();
+  });
+
+  it('creates corrections table', () => {
+    const db = getDb(TEST_DB);
+    const t = db.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='corrections'"
+    ).get() as { name: string } | null;
+    expect(t?.name).toBe('corrections');
+    db.close();
+  });
+
+  it('enforces UNIQUE(project, content_hash) on corrections', () => {
+    const db = getDb(TEST_DB);
+    const now = Math.floor(Date.now() / 1000);
+    db.run('INSERT INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', ['/p', 'a', 'h1', 's1', now]);
+    const dup = db.run('INSERT OR IGNORE INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', ['/p', 'a again', 'h1', 's2', now]);
+    expect(dup.changes).toBe(0); // same (project, content_hash) ignored
+    const diff = db.run('INSERT OR IGNORE INTO corrections (project, correction, content_hash, source_session_id, created_at) VALUES (?,?,?,?,?)', ['/p', 'b', 'h2', 's3', now]);
+    expect(diff.changes).toBe(1); // different hash inserts
+    db.close();
   });
 });

@@ -6,10 +6,13 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "test": "bun test",
+    "typecheck": "tsc --noEmit",
     "dev:install": "bun run scripts/dev-install.ts"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0"
+    "bun-types": "^1.3.14",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "fastembed": "^2.1.0"

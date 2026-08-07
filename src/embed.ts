@@ -13,7 +13,7 @@ export async function getEmbedding(text: string): Promise<Float32Array> {
   }
   const results = await model.embed([text]);
   for await (const batch of results) {
-    return batch[0];
+    return new Float32Array(batch[0]);
   }
   throw new Error('No embedding returned');
 }

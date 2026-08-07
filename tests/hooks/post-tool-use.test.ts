@@ -160,4 +160,47 @@ describe('handlePostToolUse', () => {
     expect(orig).toBeNull();
     db.close();
   });
+
+  it('stores is_error=1 when the payload signals an error (tool_response.is_error)', () => {
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: JSON.stringify({ command: 'ls /nope' }),
+      tool_response: { is_error: true, output: 'ls: /nope: not found' },
+    }, TEST_DB);
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT is_error FROM observations WHERE session_id = ? ORDER BY id DESC').get('sess-1') as { is_error: number };
+    expect(obs.is_error).toBe(1);
+    db.close();
+  });
+
+  it('stores is_error=1 via the output heuristic when there is no payload flag', () => {
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: JSON.stringify({ command: 'cat missing.txt' }),
+      tool_response: 'cat: missing.txt: No such file or directory',
+    }, TEST_DB);
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT is_error FROM observations WHERE session_id = ? ORDER BY id DESC').get('sess-1') as { is_error: number };
+    expect(obs.is_error).toBe(1);
+    db.close();
+  });
+
+  it('stores is_error=0 for a normal success', () => {
+    handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Edit',
+      tool_input: JSON.stringify({ file_path: '/tmp/project/src/a.ts' }),
+      tool_response: 'File edited successfully',
+    }, TEST_DB);
+    const db = getDb(TEST_DB);
+    const obs = db.query('SELECT is_error FROM observations WHERE session_id = ? ORDER BY id DESC').get('sess-1') as { is_error: number };
+    expect(obs.is_error).toBe(0);
+    db.close();
+  });
+
+  it('never throws while detecting is_error (odd payload)', () => {
+    expect(() => handlePostToolUse({
+      session_id: 'sess-1', cwd: '/tmp/project', tool_name: 'Bash',
+      tool_input: 'x', tool_response: { is_error: { nested: 'weird' } },
+    }, TEST_DB)).not.toThrow();
+  });
 });

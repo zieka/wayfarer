@@ -4,6 +4,21 @@ import { extractFilePaths } from '../files';
 import { compressForStorage, hardTruncate } from '../compress';
 import type { HookResponse } from './user-prompt-submit';
 
+// Conservative fallback when the payload carries no explicit error flag.
+const ERROR_TEXT_RE = /\b(error|exception|failed|failure|traceback|panic|not found|no such file|permission denied|command not found)\b/i;
+
+function detectIsError(input: Record<string, unknown>, toolOutput: string): number {
+  try {
+    const resp = input.tool_response;
+    if (resp && typeof resp === 'object' && 'is_error' in resp) {
+      return (resp as { is_error?: unknown }).is_error ? 1 : 0;
+    }
+    return ERROR_TEXT_RE.test(toolOutput) ? 1 : 0;
+  } catch {
+    return 0; // detection must never block capture
+  }
+}
+
 export function handlePostToolUse(
   input: Record<string, unknown>,
   dbPath?: string,
@@ -19,6 +34,7 @@ export function handlePostToolUse(
   const toolOutput = typeof input.tool_response === 'string'
     ? input.tool_response
     : JSON.stringify(input.tool_response ?? '');
+  const isError = detectIsError(input, toolOutput);
 
   // Constraint 1: extract file paths from the ORIGINAL input, before compression.
   const filesTouched = extractFilePaths(toolInput);
@@ -51,9 +67,9 @@ export function handlePostToolUse(
     );
 
     const res = db.run(
-      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [sessionId, project, toolName, storedInput, storedOutput, filesTouched, now],
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, is_error, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [sessionId, project, toolName, storedInput, storedOutput, filesTouched, isError, now],
     );
 
     if (originalInput !== null || originalOutput !== null) {

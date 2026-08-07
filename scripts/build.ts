@@ -1,6 +1,13 @@
 import { build } from 'esbuild';
 import { mkdirSync } from 'fs';
 
+// Type-check gate: the build is this repo's only automated gate, so hard-fail on any type error.
+const typecheck = Bun.spawnSync(['bunx', 'tsc', '--noEmit'], { stdout: 'inherit', stderr: 'inherit' });
+if (typecheck.exitCode !== 0) {
+  console.error('Type check failed (tsc --noEmit) — aborting build.');
+  process.exit(typecheck.exitCode || 1);
+}
+
 mkdirSync('plugin/scripts', { recursive: true });
 
 const hooks = [
