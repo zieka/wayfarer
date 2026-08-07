@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import {
   getCompressThreshold, getOriginalsTtlDays, hardTruncate, compressGeneric,
   MAX_COMPRESSED_CHARS, HEAD_LINES, TAIL_LINES,
+  pickStrategy, compressLog, compressField, compressForStorage,
 } from '../src/compress';
 
 describe('getCompressThreshold', () => {
@@ -80,5 +81,71 @@ describe('compressGeneric', () => {
     expect(out).toContain(`TAIL-${TAIL_LINES - 1}-`);
     expect(out).toContain('[wayfarer: dropped');
     expect(out).not.toContain('MID-25-');
+  });
+});
+
+describe('pickStrategy', () => {
+  it('routes Bash to the log strategy', () => {
+    expect(pickStrategy('Bash', 'plain output')).toBe('log');
+  });
+  it('routes text with a log signal to the log strategy', () => {
+    expect(pickStrategy('Read', 'line one\nERROR: boom\nline three')).toBe('log');
+  });
+  it('routes plain prose to the generic strategy', () => {
+    expect(pickStrategy('Read', 'just some ordinary file contents here')).toBe('generic');
+  });
+});
+
+describe('compressLog', () => {
+  it('preserves an error line buried in the middle and drops low-signal lines', () => {
+    const lines = Array.from({ length: 100 }, (_, i) => `info line ${i}`);
+    lines[50] = 'ERROR: something failed';
+    const input = lines.join('\n');
+    const out = compressLog(input);
+    expect(out).toContain('ERROR: something failed');
+    expect(out).toContain('[wayfarer: dropped');
+    expect(out.length).toBeLessThan(input.length);
+    expect(out).toContain('info line 0');   // context head kept
+    expect(out).toContain('info line 99');  // summary tail kept
+    expect(out).not.toContain('info line 40'); // low-signal middle dropped
+  });
+  it('preserves contiguous stack-frame lines', () => {
+    const lines = Array.from({ length: 80 }, (_, i) => `noise ${i}`);
+    lines[40] = 'Traceback (most recent call last):';
+    lines[41] = '    at foo (bar.ts:1)';
+    lines[42] = '    at baz (bar.ts:2)';
+    const out = compressLog(lines.join('\n'));
+    expect(out).toContain('Traceback (most recent call last):');
+    expect(out).toContain('    at foo (bar.ts:1)');
+    expect(out).toContain('    at baz (bar.ts:2)');
+  });
+});
+
+describe('compressField', () => {
+  it('passes through text at or under the threshold unchanged', () => {
+    const r = compressField('Read', 'small');
+    expect(r).toEqual({ text: 'small', compressed: false });
+  });
+  it('compresses a large multi-line field', () => {
+    const input = Array.from({ length: 400 }, (_, i) => `row ${i}`).join('\n');
+    const r = compressField('Read', input);
+    expect(r.compressed).toBe(true);
+    expect(r.text.length).toBeLessThan(input.length);
+  });
+  it('does not inflate: over-threshold but incompressible stays original', () => {
+    // one giant line, length between threshold (2048) and MAX_COMPRESSED_CHARS (4096)
+    const input = 'z'.repeat(3000);
+    const r = compressField('Read', input);
+    expect(r).toEqual({ text: input, compressed: false });
+  });
+});
+
+describe('compressForStorage', () => {
+  it('returns compressed flags for both fields', () => {
+    const bigLog = Array.from({ length: 400 }, (_, i) => `ERROR line ${i}`).join('\n');
+    const r = compressForStorage('Bash', 'small input', bigLog);
+    expect(r.input.compressed).toBe(false);
+    expect(r.output.compressed).toBe(true);
+    expect(r.output.text.length).toBeLessThan(bigLog.length);
   });
 });
