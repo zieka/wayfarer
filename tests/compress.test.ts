@@ -5,8 +5,30 @@ import {
   getCompressThreshold, getOriginalsTtlDays, hardTruncate, compressGeneric,
   MAX_COMPRESSED_CHARS, HEAD_LINES, TAIL_LINES,
   pickStrategy, compressLog, compressField, compressForStorage,
-  pruneOriginals,
+  pruneOriginals, compressionMarker, COMPRESSION_MARKER_RE,
 } from '../src/compress';
+
+describe('compressionMarker', () => {
+  it('wraps the detail in the canonical wayfarer marker', () => {
+    expect(compressionMarker('dropped 5 lines')).toBe('… [wayfarer: dropped 5 lines] …');
+  });
+});
+
+describe('COMPRESSION_MARKER_RE', () => {
+  it('matches each marker variant', () => {
+    expect(COMPRESSION_MARKER_RE.test(compressionMarker('dropped 3 chars'))).toBe(true);
+    expect(COMPRESSION_MARKER_RE.test(compressionMarker('dropped 12 lines'))).toBe(true);
+    expect(COMPRESSION_MARKER_RE.test(compressionMarker('dropped middle for size'))).toBe(true);
+  });
+  it('does not match plain text', () => {
+    expect(COMPRESSION_MARKER_RE.test('just some normal tool output')).toBe(false);
+  });
+  it('is stateless across repeated calls (no g flag)', () => {
+    const s = compressionMarker('dropped 1 lines');
+    expect(COMPRESSION_MARKER_RE.test(s)).toBe(true);
+    expect(COMPRESSION_MARKER_RE.test(s)).toBe(true); // a /g regex would flip to false here
+  });
+});
 
 describe('getCompressThreshold', () => {
   it('defaults to 2048 when unset', () => {
@@ -207,6 +229,30 @@ describe('pruneOriginals', () => {
     const remaining = db.query('SELECT observation_id FROM observation_originals').all() as Array<{ observation_id: number }>;
     expect(remaining).toHaveLength(1);
     expect(Number(remaining[0].observation_id)).toBe(Number(newObs));
+    db.close();
+  });
+
+  it('keeps a row exactly at the cutoff and deletes one just past it (strict <)', () => {
+    delete process.env.WAYFARER_ORIGINALS_TTL_DAYS; // default 14 days
+    const db = getDb(PRUNE_DB);
+    const now = Math.floor(Date.now() / 1000);
+    const cutoff = now - 14 * 86400;
+    db.run('INSERT INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s1', '/p', now]);
+    const mkObs = (createdAt: number) => db.run(
+      `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+       VALUES (?,?,?,?,?,?,?)`,
+      ['s1', '/p', 'Bash', 'in', 'out', null, createdAt],
+    ).lastInsertRowid;
+    const atCutoff = mkObs(cutoff);
+    const pastCutoff = mkObs(cutoff - 1);
+    db.run('INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at) VALUES (?,?,?,?)', [atCutoff, null, 'full-at', cutoff]);
+    db.run('INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at) VALUES (?,?,?,?)', [pastCutoff, null, 'full-past', cutoff - 1]);
+
+    const deleted = pruneOriginals(db, now);
+    expect(deleted).toBe(1); // only the past-cutoff row
+    const rows = db.query('SELECT observation_id FROM observation_originals').all() as Array<{ observation_id: number }>;
+    expect(rows).toHaveLength(1);
+    expect(Number(rows[0].observation_id)).toBe(Number(atCutoff)); // exactly-at-cutoff survives
     db.close();
   });
 });
