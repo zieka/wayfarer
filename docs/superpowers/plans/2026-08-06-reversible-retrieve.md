@@ -198,4 +198,228 @@ git commit -m "feat: unify compression markers with a detector; prune-cutoff bou
 
 ---
 
+### Task 2: `retrieveOriginal` + `formatRetrieveResult`
+
+**Files:**
+- Create: `src/retrieve-original.ts`
+- Test: `tests/retrieve-original.test.ts`
+
+**Interfaces:**
+- Consumes: `COMPRESSION_MARKER_RE` (Task 1, `src/compress.ts`); `getDb` (test only); `bun:sqlite` `Database` type.
+- Produces:
+  - `interface RetrievedField { text: string; expired: boolean }`
+  - `interface RetrieveResult { found: boolean; observationId: number; toolName?: string; createdAt?: number; input?: RetrievedField; output?: RetrievedField }`
+  - `retrieveOriginal(db: Database, observationId: number): RetrieveResult`
+  - `formatRetrieveResult(r: RetrieveResult): string`
+- Note: this task does NOT add `runRetrieve` or an `import.meta.main` entry — that is Task 3. The file must still compile/import cleanly.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/retrieve-original.test.ts
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { unlinkSync } from 'fs';
+import { getDb } from '../src/db';
+import { compressionMarker } from '../src/compress';
+import { retrieveOriginal, formatRetrieveResult } from '../src/retrieve-original';
+
+const DB = '/tmp/wayfarer-test-retrieve.db';
+
+function cleanup() {
+  for (const s of ['', '-wal', '-shm']) { try { unlinkSync(DB + s); } catch {} }
+}
+
+// Seeds one observation; writes an observation_originals row iff inputFull/outputFull is provided.
+function seedObservation(
+  db: ReturnType<typeof getDb>,
+  opts: { toolInput: string; toolOutput: string; inputFull?: string | null; outputFull?: string | null },
+): number {
+  const now = Math.floor(Date.now() / 1000);
+  db.run('INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s1', '/p', now]);
+  const id = db.run(
+    `INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at)
+     VALUES (?,?,?,?,?,?,?)`,
+    ['s1', '/p', 'Bash', opts.toolInput, opts.toolOutput, null, now],
+  ).lastInsertRowid;
+  if (opts.inputFull !== undefined || opts.outputFull !== undefined) {
+    db.run(
+      'INSERT INTO observation_originals (observation_id, tool_input_full, tool_output_full, created_at) VALUES (?,?,?,?)',
+      [id, opts.inputFull ?? null, opts.outputFull ?? null, now],
+    );
+  }
+  return Number(id);
+}
+
+describe('retrieveOriginal — three-state resolution', () => {
+  beforeEach(cleanup);
+  afterEach(cleanup);
+
+  it('state 1: original present → returns the true original, expired:false', () => {
+    const db = getDb(DB);
+    const compressed = `first line\n${compressionMarker('dropped 200 lines')}\nlast line`;
+    const trueOriginal = 'the full uncompressed output with everything intact';
+    const id = seedObservation(db, { toolInput: 'cmd', toolOutput: compressed, outputFull: trueOriginal });
+    const r = retrieveOriginal(db, id);
+    db.close();
+    expect(r.found).toBe(true);
+    expect(r.output).toEqual({ text: trueOriginal, expired: false });
+    expect(r.output!.text).not.toBe(compressed);
+  });
+
+  it('state 2: marker present but no originals row → expired:true (compressed, original pruned)', () => {
+    const db = getDb(DB);
+    const compressed = `first line\n${compressionMarker('dropped 200 lines')}\nlast line`;
+    const id = seedObservation(db, { toolInput: 'cmd', toolOutput: compressed }); // no originals row
+    const r = retrieveOriginal(db, id);
+    db.close();
+    expect(r.output).toEqual({ text: compressed, expired: true });
+  });
+
+  it('state 3: no marker and no originals row → never-compressed, expired:false (stored is full)', () => {
+    const db = getDb(DB);
+    const stored = 'short uncompressed output, no marker';
+    const id = seedObservation(db, { toolInput: 'cmd', toolOutput: stored }); // no originals row
+    const r = retrieveOriginal(db, id);
+    db.close();
+    expect(r.output).toEqual({ text: stored, expired: false });
+  });
+
+  it('distinguishes expired from never-compressed in BOTH directions', () => {
+    const db = getDb(DB);
+    const withMarker = `x\n${compressionMarker('dropped 9 lines')}\ny`;
+    const withoutMarker = 'plain output';
+    const expiredId = seedObservation(db, { toolInput: 'a', toolOutput: withMarker });   // marker, no originals
+    const cleanId = seedObservation(db, { toolInput: 'b', toolOutput: withoutMarker });  // no marker, no originals
+    const expired = retrieveOriginal(db, expiredId);
+    const clean = retrieveOriginal(db, cleanId);
+    db.close();
+    expect(expired.output!.expired).toBe(true);   // marker ⇒ expired
+    expect(clean.output!.expired).toBe(false);    // no marker ⇒ never-compressed
+  });
+});
+
+describe('retrieveOriginal — other cases', () => {
+  beforeEach(cleanup);
+  afterEach(cleanup);
+
+  it('returns found:false for an unknown id', () => {
+    const db = getDb(DB);
+    const r = retrieveOriginal(db, 99999);
+    db.close();
+    expect(r).toEqual({ found: false, observationId: 99999 });
+  });
+
+  it('resolves input and output independently', () => {
+    const db = getDb(DB);
+    const inputCompressed = `in-head\n${compressionMarker('dropped 5 lines')}\nin-tail`; // marker, no full → expired
+    const outputCompressed = `out-head\n${compressionMarker('dropped 7 lines')}\nout-tail`;
+    const outputFull = 'the preserved full output';
+    const id = seedObservation(db, { toolInput: inputCompressed, toolOutput: outputCompressed, outputFull });
+    const r = retrieveOriginal(db, id);
+    db.close();
+    expect(r.input).toEqual({ text: inputCompressed, expired: true });  // input original gone
+    expect(r.output).toEqual({ text: outputFull, expired: false });     // output original preserved
+  });
+});
+
+describe('formatRetrieveResult', () => {
+  it('renders not-found wording', () => {
+    expect(formatRetrieveResult({ found: false, observationId: 7 })).toContain('no observation with id 7');
+  });
+  it('renders both fields and flags an expired one', () => {
+    const out = formatRetrieveResult({
+      found: true, observationId: 3, toolName: 'Bash', createdAt: 0,
+      input: { text: 'full in', expired: false },
+      output: { text: 'compressed out', expired: true },
+    });
+    expect(out).toContain('Observation #3');
+    expect(out).toContain('full in');
+    expect(out).toContain('compressed out');
+    expect(out).toContain('original expired');
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `bun test tests/retrieve-original.test.ts`
+Expected: FAIL — cannot resolve `../src/retrieve-original` / exports undefined.
+
+- [ ] **Step 3: Write the implementation**
+
+```ts
+// src/retrieve-original.ts
+import type { Database } from 'bun:sqlite';
+import { COMPRESSION_MARKER_RE } from './compress';
+
+export interface RetrievedField {
+  text: string;
+  expired: boolean; // true = was compressed but the original is gone (TTL-pruned)
+}
+
+export interface RetrieveResult {
+  found: boolean;
+  observationId: number;
+  toolName?: string;
+  createdAt?: number;
+  input?: RetrievedField;
+  output?: RetrievedField;
+}
+
+export function retrieveOriginal(db: Database, observationId: number): RetrieveResult {
+  const obs = db.query(
+    'SELECT tool_name, tool_input, tool_output, created_at FROM observations WHERE id = ?',
+  ).get(observationId) as
+    { tool_name: string; tool_input: string; tool_output: string; created_at: number } | null;
+  if (!obs) return { found: false, observationId };
+
+  const orig = db.query(
+    'SELECT tool_input_full, tool_output_full FROM observation_originals WHERE observation_id = ?',
+  ).get(observationId) as
+    { tool_input_full: string | null; tool_output_full: string | null } | null;
+
+  // Three-state resolution: preserved original → stored-with-marker (expired) → stored (never compressed).
+  const resolve = (full: string | null | undefined, stored: string): RetrievedField => {
+    if (full != null) return { text: full, expired: false };
+    if (COMPRESSION_MARKER_RE.test(stored)) return { text: stored, expired: true };
+    return { text: stored, expired: false };
+  };
+
+  return {
+    found: true,
+    observationId,
+    toolName: obs.tool_name,
+    createdAt: obs.created_at,
+    input: resolve(orig?.tool_input_full, obs.tool_input),
+    output: resolve(orig?.tool_output_full, obs.tool_output),
+  };
+}
+
+export function formatRetrieveResult(r: RetrieveResult): string {
+  if (!r.found) return `wayfarer-retrieve: no observation with id ${r.observationId}\n`;
+  const when = new Date((r.createdAt ?? 0) * 1000).toISOString();
+  const field = (label: string, f?: RetrievedField): string => {
+    if (!f) return '';
+    const note = f.expired ? ' (original expired — showing compressed form)' : '';
+    return `### ${label}${note}\n${f.text}\n`;
+  };
+  return `## Observation #${r.observationId} — ${r.toolName} @ ${when}\n` +
+    field('Input', r.input) + field('Output', r.output);
+}
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `bun test tests/retrieve-original.test.ts`
+Expected: PASS (all three-state, independence, not-found, and format cases).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/retrieve-original.ts tests/retrieve-original.test.ts
+git commit -m "feat: retrieveOriginal three-state resolution and result formatting"
+```
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
