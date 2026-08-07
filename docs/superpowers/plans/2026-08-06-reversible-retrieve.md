@@ -544,4 +544,120 @@ git commit -m "feat: runRetrieve CLI core distinguishing real errors from not-fo
 
 ---
 
+### Task 4: Build wiring + `wayfarer-retrieve` skill
+
+**Files:**
+- Modify: `scripts/build.ts`
+- Create: `plugin/skills/retrieve/SKILL.md`
+- Check (modify only if needed): `scripts/dev-install.ts`, `plugin/.claude-plugin/plugin.json`, `plugin/.claude-plugin/marketplace.json`
+
+**Interfaces:**
+- Consumes: the `import.meta.main` entry in `src/retrieve-original.ts` (Task 3).
+- Produces: `plugin/scripts/retrieve.js` (built), the `wayfarer-retrieve` skill.
+- Note: this task is build config + markdown; the retrieval LOGIC is already unit-tested (Tasks 2–3). Verification here is a build + a smoke run of the built script + confirming skill discovery.
+
+- [ ] **Step 1: Add the build entry**
+
+In `scripts/build.ts`, after the `summarize-worker` build block, add:
+
+```ts
+// Build the retrieve CLI (invoked by the wayfarer-retrieve skill)
+await build({
+  entryPoints: ['src/retrieve-original.ts'],
+  bundle: true,
+  outfile: 'plugin/scripts/retrieve.js',
+  platform: 'node',
+  target: 'esnext',
+  format: 'esm',
+  minify: false,
+  external: ['bun:sqlite', 'fastembed', 'onnxruntime-node'],
+  banner: { js: '#!/usr/bin/env bun' },
+});
+```
+
+And update the final log line to mention it:
+
+```ts
+console.log(`Built ${hooks.length} hooks + summarize-worker + retrieve to plugin/scripts/`);
+```
+
+- [ ] **Step 2: Build and confirm the artifact**
+
+Run: `bun run build`
+Expected: `Built 4 hooks + summarize-worker + retrieve to plugin/scripts/`, and `plugin/scripts/retrieve.js` now exists.
+Run: `ls plugin/scripts/retrieve.js`
+Expected: the file is listed.
+
+- [ ] **Step 3: Create the skill**
+
+Create `plugin/skills/retrieve/SKILL.md`:
+
+```markdown
+---
+name: wayfarer-retrieve
+description: "Retrieve the full original of a compressed past observation by its id. Use when a #id from wayfarer-search or injected context needs its full tool input/output."
+---
+
+# Wayfarer Retrieve
+
+Expand a compressed past observation back to its full original tool input/output.
+
+## When to Use
+
+- You saw a `#<id>` in injected `<wayfarer-context>` or in `wayfarer-search` results and need the full detail behind it.
+- A context row or search result is truncated (shows a `[wayfarer: dropped …]` marker) and you need what was dropped.
+
+## How to Retrieve
+
+Run with the observation id:
+
+```bash
+bun "$CLAUDE_PLUGIN_ROOT/scripts/retrieve.js" <observationId>
+```
+
+## Reading the Output
+
+- `## Observation #<id> — <tool> @ <time>`, then `### Input` / `### Output` with the full original content.
+- `(original expired — showing compressed form)` on a field: the original passed its retention window; only the compressed form remains.
+- `no observation with id <id>`: no such observation exists.
+- `error retrieving observation <id>: <message>`: retrieval failed (e.g. the database is unreadable). This is distinct from "does not exist" — the observation may well exist.
+```
+
+- [ ] **Step 4: Confirm skill discovery**
+
+Run: `grep -rn "skills/search\|wayfarer-search\|skills" scripts/dev-install.ts plugin/.claude-plugin/*.json`
+Expected: determine whether skills are enumerated explicitly or auto-discovered from `plugin/skills/`.
+- If the existing `wayfarer-search` skill is NOT enumerated anywhere (auto-discovered from `plugin/skills/`), no manifest change is needed — the new skill is discovered the same way.
+- If skills ARE enumerated (e.g. dev-install copies a specific list, or a manifest lists them), add `wayfarer-retrieve` alongside `wayfarer-search` in the same place, matching its pattern.
+
+- [ ] **Step 5: Smoke-run the built script**
+
+```bash
+SMOKE_DB=/tmp/wayfarer-smoke.db
+rm -f "$SMOKE_DB" "$SMOKE_DB-wal" "$SMOKE_DB-shm"
+bun -e "
+import { getDb } from './src/db';
+const db = getDb('$SMOKE_DB');
+db.run('INSERT OR IGNORE INTO sessions (session_id, project, started_at) VALUES (?,?,?)', ['s','/p',0]);
+db.run('INSERT INTO observations (session_id, project, tool_name, tool_input, tool_output, files_touched, created_at) VALUES (?,?,?,?,?,?,?)', ['s','/p','Bash','echo hi','hi there',null,0]);
+db.close();
+"
+bun plugin/scripts/retrieve.js 1 "$SMOKE_DB"
+rm -f "$SMOKE_DB" "$SMOKE_DB-wal" "$SMOKE_DB-shm"
+```
+Expected: output contains `Observation #1` and `hi there` (the built CLI reads the id and the optional db-path arg, and formats the observation).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/build.ts plugin/skills/retrieve/SKILL.md
+# include any manifest/dev-install change from Step 4 if one was needed:
+# git add scripts/dev-install.ts plugin/.claude-plugin/marketplace.json
+git commit -m "feat: build retrieve.js and add the wayfarer-retrieve skill"
+```
+
+(Do not commit `plugin/scripts/retrieve.js` if built artifacts are git-ignored; follow whatever the repo already does for `plugin/scripts/*.js`.)
+
+---
+
 <!-- Task detail appended incrementally, one task per commit. -->
