@@ -9,6 +9,7 @@
 
 import { getDb } from './db';
 import { formatObservations, parseSummaryResponse } from './summarize';
+import { pruneOriginals } from './compress';
 import { spawn } from 'child_process';
 
 const sessionId = process.argv[2];
@@ -91,6 +92,13 @@ try {
   } catch (e) {
     // Embedding failure is non-fatal — FTS5 search still works
     console.error(`wayfarer: embedding failed: ${(e as Error).message}`);
+  }
+
+  // TTL-prune expired observation originals. Non-fatal — never affects the summary write.
+  try {
+    pruneOriginals(db, Math.floor(Date.now() / 1000));
+  } catch (e) {
+    console.error(`wayfarer: prune failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   db.close();
