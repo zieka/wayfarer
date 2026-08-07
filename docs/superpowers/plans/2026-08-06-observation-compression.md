@@ -711,4 +711,73 @@ git commit -m "feat: compress observations at capture, preserve originals"
 
 ---
 
-<!-- Task detail appended incrementally, one task per commit. -->
+### Task 5: Prune in the worker + full-suite/build gate
+
+**Files:**
+- Modify: `src/summarize-worker.ts` (call `pruneOriginals`)
+
+**Interfaces:**
+- Consumes: `pruneOriginals` (`src/compress.ts`, Task 3).
+- Produces: nothing new.
+
+**Note on testing:** the worker is a detached script that spawns the external `claude` CLI, so it is not unit-tested here. `pruneOriginals` itself is unit-tested in Task 3; this task's verification is the full-suite + build gate below. The wiring is a single guarded call so a prune failure never affects the summary write.
+
+- [ ] **Step 1: Add the import**
+
+```ts
+// src/summarize-worker.ts — add with the existing top-of-file imports
+import { pruneOriginals } from './compress';
+```
+
+- [ ] **Step 2: Call prune before closing the DB**
+
+In `src/summarize-worker.ts`, the main `try` block ends with `db.close();` (currently the last statement before the outer `catch`). Insert the prune call immediately before that `db.close();`:
+
+```ts
+  // TTL-prune expired observation originals. Non-fatal — never affects the summary write.
+  try {
+    pruneOriginals(db, Math.floor(Date.now() / 1000));
+  } catch (e) {
+    console.error(`wayfarer: prune failed: ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  db.close();
+```
+
+- [ ] **Step 3: Run the full suite**
+
+Run: `bun test`
+Expected: PASS — the entire suite is green (Task 1–4 tests plus all pre-existing tests). Note: Bun v1.3.x may print a C++ panic AFTER the summary line with exit code 0 — that is a known upstream shutdown bug; judge success by the `N pass, 0 fail` line, not the panic.
+
+- [ ] **Step 4: Build**
+
+Run: `bun run build`
+Expected: `Built 4 hooks + summarize-worker to plugin/scripts/` with no errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/summarize-worker.ts
+git commit -m "feat: TTL-prune observation originals in the background worker"
+```
+
+---
+
+## Self-Review
+
+**Spec coverage:**
+- Preserve originals with a TTL → Task 3 (`observation_originals` + `pruneOriginals`) + Task 5 (wired in worker). ✓
+- Lean compressors (generic + log-aware) → Tasks 1–2. ✓
+- Approach A: `src/compress.ts` module + v4 migration; capture wires in; prune off the hot path → Tasks 1–5. ✓
+- 2KB threshold / 14-day TTL, env-overridable, parse-with-fallback → Task 1 (`getCompressThreshold`, `getOriginalsTtlDays`). ✓
+- Never block/throw in capture; failure → hardTruncate + no originals → Task 4 (try/catch) + Constraint 2 test. ✓
+- File extraction on original before compression → Task 4 + Constraint 1 test. ✓
+- No-inflate → Task 2 (`compressField`) + its test. ✓
+- Bounded by `MAX_COMPRESSED_CHARS` → Tasks 1–2 (`hardTruncate` tail-caps every path). ✓
+- New table only; existing columns/FTS untouched → Task 3 (additive migration). ✓
+- `db.test.ts` `user_version` 3 → 4 → Task 3. ✓
+
+**Placeholder scan:** none — every code step has full code; every run step has an exact command + expected result.
+
+**Type consistency:** `compressForStorage` signature is identical in Tasks 2 and 4 (`(toolName, toolInput, toolOutput) → { input:{text,compressed}, output:{text,compressed} }`); the Task 4 injected `deps.compress` is typed `typeof compressForStorage`. `pruneOriginals(db, nowSeconds): number` is identical in Tasks 3 and 5. `hardTruncate(text): string` used in Tasks 1, 2, 4 consistently. `res.lastInsertRowid` (bun:sqlite `db.run` return) used in Task 4 matches the prune test's `.lastInsertRowid` usage in Task 3.
+
